@@ -103,4 +103,3 @@ python -m unittest discover -s tests -v
 ```
 
 当前脚本针对实验方案的 iSAID-5i 主实验实现。Potsdam 的 tile split、颜色映射和 void 规则在设计中被明确要求先写入预注册 manifest；在这些信息未给定前，脚本不会猜测映射或改动数据集。
-
