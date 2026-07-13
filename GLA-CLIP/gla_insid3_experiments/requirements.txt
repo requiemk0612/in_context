@@ -1,0 +1,8 @@
+# Reuse the existing INSID3 environment; do not install these during a run.
+torch
+torchvision
+numpy
+Pillow
+scikit-learn
+einops
+pycocotools

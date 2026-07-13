@@ -32,6 +32,8 @@ class Window:
 def _starts(length: int, crop: int, stride: int) -> list[int]:
     if crop <= 0 or stride <= 0:
         raise ValueError("crop and stride must be positive")
+    if stride > crop:
+        raise ValueError("stride cannot exceed crop because it would leave coverage holes")
     if length <= crop:
         return [0]
     values = list(range(0, length - crop + 1, stride))
@@ -105,6 +107,8 @@ def stitch_scores(
     variance_sq = torch.zeros_like(total)
     count = torch.zeros_like(total)
     for score, window in zip(scores, windows):
+        if score.ndim != 2:
+            raise ValueError(f"Each score must be HxW, got shape {tuple(score.shape)}")
         resized = F.interpolate(score[None, None].float(), (window.height, window.width), mode="bilinear", align_corners=False)[0, 0].to(dtype)
         weight = blend_weights(window.height, window.width, mode, device, dtype)
         region = (slice(window.y1, window.y2), slice(window.x1, window.x2))
@@ -135,7 +139,11 @@ def fuse_feature_windows(
     """Fuse aligned feature tokens onto a global token canvas for SW-Early."""
     if not features:
         raise ValueError("features cannot be empty")
+    if len(features) != len(windows):
+        raise ValueError("features and windows must be equally sized")
     c, fh, fw = features[0].shape
+    if any(feature.shape != features[0].shape for feature in features):
+        raise ValueError("All feature windows must share a CxHxW shape")
     step_y = windows[0].height / fh
     step_x = windows[0].width / fw
     gh = max(1, round(image_hw[0] / step_y))

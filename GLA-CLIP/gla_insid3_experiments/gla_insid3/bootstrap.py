@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.metadata
 import json
+import platform
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,11 +46,20 @@ def implementation_manifest(
     insid3_root = Path(insid3_root).resolve()
     experiment_root = Path(experiment_root).resolve()
     tracked = [
+        insid3_root / "models" / "__init__.py",
         insid3_root / "models" / "insid3.py",
         insid3_root / "utils" / "clustering.py",
         insid3_root / "utils" / "data.py",
-        experiment_root / "run_experiment.py",
     ]
+    tracked.extend(sorted(experiment_root.glob("*.py")))
+    tracked.extend(sorted((experiment_root / "gla_insid3").glob("*.py")))
+
+    def package_version(name: str) -> str | None:
+        try:
+            return importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            return None
+
     return {
         "format_version": 1,
         "arguments": args,
@@ -61,6 +72,14 @@ def implementation_manifest(
             "area_weight": True,
             "clustering_spatial_connectivity": False,
             "network_required": False,
+        },
+        "runtime": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "packages": {
+                name: package_version(name)
+                for name in ("torch", "torchvision", "numpy", "Pillow", "scikit-learn")
+            },
         },
     }
 

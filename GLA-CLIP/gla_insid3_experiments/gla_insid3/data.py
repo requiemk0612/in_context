@@ -32,6 +32,11 @@ class Episode:
     window_crop: int
     window_stride: int
     target_windows_with_foreground: int
+    target_height: int | None = None
+    target_width: int | None = None
+    target_foreground_pixels: int | None = None
+    target_foreground_fraction: float | None = None
+    target_total_windows: int | None = None
 
 
 class ISAIDStore:
@@ -60,10 +65,21 @@ class ISAIDStore:
 
     def load_label(self, image_id: str) -> np.ndarray:
         with Image.open(self.mask_path(image_id)) as image:
-            return np.asarray(image).copy()
+            label = np.asarray(image).copy()
+        if label.ndim != 2:
+            raise ValueError(
+                f"Expected a single-channel semantic label at {self.mask_path(image_id)}, "
+                f"got shape {label.shape}"
+            )
+        return label
 
     def binary_mask(self, image_id: str, class_id: int) -> torch.Tensor:
         return torch.from_numpy(self.load_label(image_id) == class_id + 1)
+
+    def target_masks(self, image_id: str, class_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the binary class mask and the iSAID void/boundary ignore mask."""
+        label = self.load_label(image_id)
+        return torch.from_numpy(label == class_id + 1), torch.from_numpy(label == 255)
 
 
 def scan_class_index(store: ISAIDStore) -> dict[int, list[str]]:
@@ -95,17 +111,27 @@ def generate_manifest(
 ) -> list[Episode]:
     if fold not in (0, 1, 2):
         raise ValueError("fold must be 0, 1, or 2")
+    if shots <= 0 or num_episodes <= 0:
+        raise ValueError("shots and num_episodes must be positive")
+    # Validate geometry before the potentially expensive label scan.
+    make_windows(max(crop, 1), max(crop, 1), crop, stride)
     index = scan_class_index(store)
     rng = random.Random(seed)
     class_ids = list(range(fold * 5, fold * 5 + 5))
-    targets: dict[int, list[tuple[str, int]]] = {}
+    targets: dict[int, list[tuple]] = {}
     for class_id in class_ids:
         items = []
         for image_id in index[class_id]:
-            mask = store.load_label(image_id) == class_id + 1
+            label = store.load_label(image_id)
+            mask = label == class_id + 1
             count = _foreground_window_count(mask, crop, stride)
             if not cross_window_only or count >= 2:
-                items.append((image_id, count))
+                image_height, image_width = mask.shape
+                items.append((
+                    image_id, count, image_height, image_width,
+                    int(mask.sum()), float(mask.mean()),
+                    len(make_windows(image_height, image_width, crop, stride)),
+                ))
         rng.shuffle(items)
         targets[class_id] = items
     episodes: list[Episode] = []
@@ -118,7 +144,10 @@ def generate_manifest(
             items = targets[class_id]
             if cursor[class_id] >= len(items):
                 continue
-            target, window_count = items[cursor[class_id]]
+            (
+                target, window_count, target_height, target_width,
+                foreground_pixels, foreground_fraction, total_windows,
+            ) = items[cursor[class_id]]
             cursor[class_id] += 1
             refs = [item for item in index[class_id] if item != target]
             if len(refs) < shots:
@@ -134,6 +163,11 @@ def generate_manifest(
                 window_crop=crop,
                 window_stride=stride,
                 target_windows_with_foreground=window_count,
+                target_height=target_height,
+                target_width=target_width,
+                target_foreground_pixels=foreground_pixels,
+                target_foreground_fraction=foreground_fraction,
+                target_total_windows=total_windows,
             ))
             made_progress = True
         if not made_progress:
@@ -150,4 +184,13 @@ def generate_manifest(
 
 def load_manifest(path: str | Path) -> list[Episode]:
     with Path(path).open(encoding="utf-8") as handle:
-        return [Episode(**json.loads(line)) for line in handle if line.strip()]
+        episodes = [Episode(**json.loads(line)) for line in handle if line.strip()]
+    if not episodes:
+        raise ValueError(f"Episode manifest is empty: {path}")
+    ids = [episode.episode_id for episode in episodes]
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"Episode manifest contains duplicate episode_id values: {path}")
+    for episode in episodes:
+        if episode.fold not in (0, 1, 2) or not 0 <= episode.class_id < len(CATEGORIES):
+            raise ValueError(f"Invalid fold/class in episode {episode.episode_id}")
+    return episodes
