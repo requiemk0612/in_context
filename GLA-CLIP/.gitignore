@@ -1,0 +1,12 @@
+*.pkl
+*pycache*
+*pth
+*xlsx
+*work*
+model
+*.pt
+*.jpg
+wandb
+*.log
+*.json
+output

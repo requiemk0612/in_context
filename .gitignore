@@ -1,0 +1,12 @@
+data/
+datasets/
+checkpoints/
+weights/
+outputs/
+logs/
+wandb/
+.cache/
+__pycache__/
+*.pth
+*.pt
+*.ckpt
