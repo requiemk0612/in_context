@@ -13,5 +13,6 @@ cd "${EXP_DIR}"
  --manifest manifests/isaid_fold0_mvp.jsonl \
  --output-dir outputs/test \
  --methods B0,B1,B2,B3,A0,A7 \
+ --min-reference-tokens 20 \
  --device cuda \
  --window-batch-size 1

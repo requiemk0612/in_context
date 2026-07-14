@@ -6,7 +6,7 @@
 # 1. 不加载真实 DINO 权重的单元/烟雾测试
 bash /data2/cld/in_context/GLA-CLIP/scripts/unittest.sh
 
-# 2. 首次运行时固化 50 个 episode
+# 2. 固化 50 个 episode（reference 筛选规则变化后必须重新生成）
 bash /data2/cld/in_context/GLA-CLIP/scripts/manifest.sh
 
 # 3. 用 1 个真实 episode 检查三条 baseline 能否跑通
@@ -25,6 +25,12 @@ EPISODE_LIMIT=5 OUTPUT_DIR=outputs/SW_diagnostic_5 \
 
 输出目录已经存在 `metrics.jsonl` 时程序会拒绝重复追加；请指定新 `OUTPUT_DIR`，或直接在命令行使用 `--resume`。
 
+`manifest.sh`、`SW_smoke.sh` 和 `SW_diagnostic.sh` 均固定
+`--min-reference-tokens 20`。token 数按 INSID3 实际的
+`原 mask → 1024×1024 → 64×64 feature mask` 路径计算。旧 manifest
+没有这项筛选，必须重新运行 `manifest.sh`；运行阶段也会再次计算并校验，
+若 reference 少于 20 tokens 会直接报出 image id 和实际 token 数。
+
 ## Baseline 与分辨率
 
 - `B0 / No-SW`：整图统一压缩到 INSID3 的 `1024×1024` 输入，DINOv3 patch-16 输出 `64×64` feature，再做一次全图 reasoning。
@@ -37,7 +43,7 @@ EPISODE_LIMIT=5 OUTPUT_DIR=outputs/SW_diagnostic_5 \
 
 ```text
 outputs/<run>/checkpoints/<episode>/
-  reference.pt           # reference mask/raw/debiased feature/prototype
+  reference.pt           # reference mask/raw/debiased feature/prototype/token count
   window_extraction.pt   # crop 坐标、raw/debiased feature、全图 token 坐标
   B0.pt                   # No-SW reasoning 全阶段与最终拼接结果
   B1.pt                   # Late-SW 每窗 matching/candidate/cluster/score
@@ -45,4 +51,3 @@ outputs/<run>/checkpoints/<episode>/
 ```
 
 每个 method checkpoint 都记录 `source_window_specs`、`reasoning_window_specs` 和 `resolution`，可直接核对输入尺度、feature 尺度及 token 数。Tensor 会在保存前转到 CPU，便于离线读取。
-

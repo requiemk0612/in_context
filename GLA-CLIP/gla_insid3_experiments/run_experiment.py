@@ -68,6 +68,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-size", choices=("small", "base", "large"), default="large")
     parser.add_argument("--image-size", type=int, default=1024)
     parser.add_argument("--svd-comps", type=int, default=500)
+    parser.add_argument(
+        "--min-reference-tokens", type=int, default=10,
+        help="Require this many foreground tokens per reference on the DINO feature grid",
+    )
     parser.add_argument("--tau", type=float, default=0.6)
     parser.add_argument("--merge-thresh", type=float, default=0.2)
     parser.add_argument("--device", default="cuda")
@@ -297,6 +301,8 @@ def _evaluate_method(
         "score_variance_mean": float(stitched["score_variance"].mean().item()),
         "target_foreground_fraction": episode.target_foreground_fraction,
         "target_windows_with_foreground": episode.target_windows_with_foreground,
+        "reference_foreground_tokens": reference.foreground_token_counts,
+        "min_reference_tokens": args.min_reference_tokens,
         "encoder_input_hw": [int(model.image_size), int(model.image_size)],
         "encoder_patch_size": 16,
         "source_num_windows": len(source_state.windows),
@@ -307,6 +313,15 @@ def _evaluate_method(
         "reasoning_num_maps": len(results),
         "reasoning_feature_hw": [list(item["continuous_score"].shape) for item in results],
         "reasoning_tokens_per_map": [int(item["continuous_score"].numel()) for item in results],
+        "forward_positive_tokens_per_map": [
+            int(item["forward_mask"].sum().item()) for item in results
+        ],
+        "backward_positive_tokens_per_map": [
+            int(item["backward_mask"].sum().item()) for item in results
+        ],
+        "candidate_tokens_per_map": [
+            int(item["candidate_mask"].sum().item()) for item in results
+        ],
     }
     if method == "B3":
         record.update({
@@ -373,6 +388,8 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("window-batch-size, early-max-tokens, and d4-max-tokens must be positive")
     if args.duplicate_tolerance < 0:
         raise ValueError("duplicate-tolerance must be non-negative")
+    if args.min_reference_tokens < 0:
+        raise ValueError("min-reference-tokens must be non-negative")
     if args.episode_limit < 0:
         raise ValueError("episode-limit must be non-negative")
     output_dir = artifact_path(args.output_dir)
@@ -420,6 +437,20 @@ def run(args: argparse.Namespace) -> None:
         reference_images = [store.load_image(item) for item in episode.reference_image_ids]
         reference_masks = [store.binary_mask(item, episode.class_id) for item in episode.reference_image_ids]
         reference = prepare_reference(model, reference_images, reference_masks, args.device)
+        insufficient = [
+            (image_id, count)
+            for image_id, count in zip(
+                episode.reference_image_ids, reference.foreground_token_counts
+            )
+            if count < args.min_reference_tokens
+        ]
+        if insufficient:
+            details = ", ".join(f"{image_id}={count}" for image_id, count in insufficient)
+            raise RuntimeError(
+                f"Episode {episode.episode_id} has undersized reference foreground "
+                f"({details} tokens; required >= {args.min_reference_tokens}). "
+                "Regenerate the manifest with the same --min-reference-tokens."
+            )
         windows = make_windows(target.height, target.width, episode.window_crop, episode.window_stride)
         if episode_index == 0 and not args.skip_duplicate_control:
             control = duplicate_control(model, target, windows[0], args.device)
@@ -442,6 +473,8 @@ def run(args: argparse.Namespace) -> None:
                     "raw_features": reference.raw_features,
                     "debiased_features": reference.debiased_features,
                     "prototype": reference.prototype,
+                    "foreground_token_counts": reference.foreground_token_counts,
+                    "min_reference_tokens": args.min_reference_tokens,
                     "encoder_input_hw": [int(model.image_size), int(model.image_size)],
                     "feature_hw": list(reference.raw_features.shape[-2:]),
                 }), reference_path)
@@ -504,6 +537,9 @@ def main() -> None:
             ISAIDStore(args.data_root), manifest_path, args.fold, args.shots,
             args.num_episodes, args.window_crop, args.window_stride, args.seed,
             cross_window_only=not args.include_single_window_targets,
+            min_reference_tokens=args.min_reference_tokens,
+            encoder_image_size=args.image_size,
+            reference_feature_grid=args.image_size // 16,
         )
         print(f"Wrote {len(episodes)} episodes to {manifest_path}")
     else:

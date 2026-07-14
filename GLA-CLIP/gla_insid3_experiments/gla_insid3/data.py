@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from .windows import make_windows
@@ -37,6 +38,9 @@ class Episode:
     target_foreground_pixels: int | None = None
     target_foreground_fraction: float | None = None
     target_total_windows: int | None = None
+    reference_foreground_tokens: list[int] | None = None
+    reference_feature_grid: int | None = None
+    min_reference_tokens: int | None = None
 
 
 class ISAIDStore:
@@ -98,6 +102,32 @@ def _foreground_window_count(mask: np.ndarray, crop: int, stride: int) -> int:
     return sum(bool(mask[w.y1:w.y2, w.x1:w.x2].any()) for w in make_windows(height, width, crop, stride))
 
 
+def foreground_token_count(
+    mask: np.ndarray | torch.Tensor,
+    encoder_image_size: int = 1024,
+    feature_grid_size: int = 64,
+) -> int:
+    """Count foreground tokens using the same resize/downsample path as INSID3."""
+    if encoder_image_size <= 0 or feature_grid_size <= 0:
+        raise ValueError("encoder_image_size and feature_grid_size must be positive")
+    tensor = torch.as_tensor(mask, dtype=torch.float32)[None, None]
+    resized = F.interpolate(
+        tensor, (encoder_image_size, encoder_image_size), mode="nearest"
+    )
+    down = F.interpolate(
+        resized, (feature_grid_size, feature_grid_size),
+        mode="bilinear", align_corners=False,
+    )[0, 0] > 0.5
+    if not down.any():
+        down = F.interpolate(
+            resized, (feature_grid_size, feature_grid_size), mode="nearest"
+        )[0, 0] > 0.5
+    if not down.any() and tensor.any():
+        # INSID3's downsample_mask keeps one center token as the final fallback.
+        return 1
+    return int(down.sum().item())
+
+
 def generate_manifest(
     store: ISAIDStore,
     output_path: str | Path,
@@ -108,17 +138,33 @@ def generate_manifest(
     stride: int,
     seed: int,
     cross_window_only: bool = True,
+    min_reference_tokens: int = 10,
+    encoder_image_size: int = 1024,
+    reference_feature_grid: int = 64,
 ) -> list[Episode]:
     if fold not in (0, 1, 2):
         raise ValueError("fold must be 0, 1, or 2")
     if shots <= 0 or num_episodes <= 0:
         raise ValueError("shots and num_episodes must be positive")
+    if min_reference_tokens < 0:
+        raise ValueError("min_reference_tokens must be non-negative")
     # Validate geometry before the potentially expensive label scan.
     make_windows(max(crop, 1), max(crop, 1), crop, stride)
     index = scan_class_index(store)
     rng = random.Random(seed)
     class_ids = list(range(fold * 5, fold * 5 + 5))
     targets: dict[int, list[tuple]] = {}
+    reference_token_cache: dict[tuple[str, int], int] = {}
+
+    def reference_tokens(image_id: str, class_id: int) -> int:
+        key = (image_id, class_id)
+        if key not in reference_token_cache:
+            mask = store.load_label(image_id) == class_id + 1
+            reference_token_cache[key] = foreground_token_count(
+                mask, encoder_image_size, reference_feature_grid
+            )
+        return reference_token_cache[key]
+
     for class_id in class_ids:
         items = []
         for image_id in index[class_id]:
@@ -142,34 +188,41 @@ def generate_manifest(
             if len(episodes) >= num_episodes:
                 break
             items = targets[class_id]
-            if cursor[class_id] >= len(items):
-                continue
-            (
-                target, window_count, target_height, target_width,
-                foreground_pixels, foreground_fraction, total_windows,
-            ) = items[cursor[class_id]]
-            cursor[class_id] += 1
-            refs = [item for item in index[class_id] if item != target]
-            if len(refs) < shots:
-                continue
-            references = rng.sample(refs, shots)
-            episodes.append(Episode(
-                episode_id=f"f{fold}-c{class_id:02d}-e{len(episodes):04d}",
-                fold=fold,
-                class_id=class_id,
-                class_name=CATEGORIES[class_id],
-                reference_image_ids=references,
-                target_image_id=target,
-                window_crop=crop,
-                window_stride=stride,
-                target_windows_with_foreground=window_count,
-                target_height=target_height,
-                target_width=target_width,
-                target_foreground_pixels=foreground_pixels,
-                target_foreground_fraction=foreground_fraction,
-                target_total_windows=total_windows,
-            ))
-            made_progress = True
+            while cursor[class_id] < len(items):
+                (
+                    target, window_count, target_height, target_width,
+                    foreground_pixels, foreground_fraction, total_windows,
+                ) = items[cursor[class_id]]
+                cursor[class_id] += 1
+                refs = [
+                    item for item in index[class_id]
+                    if item != target and reference_tokens(item, class_id) >= min_reference_tokens
+                ]
+                if len(refs) < shots:
+                    continue
+                references = rng.sample(refs, shots)
+                token_counts = [reference_tokens(item, class_id) for item in references]
+                episodes.append(Episode(
+                    episode_id=f"f{fold}-c{class_id:02d}-e{len(episodes):04d}",
+                    fold=fold,
+                    class_id=class_id,
+                    class_name=CATEGORIES[class_id],
+                    reference_image_ids=references,
+                    target_image_id=target,
+                    window_crop=crop,
+                    window_stride=stride,
+                    target_windows_with_foreground=window_count,
+                    target_height=target_height,
+                    target_width=target_width,
+                    target_foreground_pixels=foreground_pixels,
+                    target_foreground_fraction=foreground_fraction,
+                    target_total_windows=total_windows,
+                    reference_foreground_tokens=token_counts,
+                    reference_feature_grid=reference_feature_grid,
+                    min_reference_tokens=min_reference_tokens,
+                ))
+                made_progress = True
+                break
         if not made_progress:
             break
     if len(episodes) < num_episodes:

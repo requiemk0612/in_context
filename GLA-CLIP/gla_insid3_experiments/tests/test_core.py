@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from unittest.mock import mock_open, patch
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 from gla_insid3.aligner import AlignerConfig, FACTORIAL, align_feature_windows, factorial_config
+from gla_insid3.data import foreground_token_count, generate_manifest
 from gla_insid3.metrics import binary_metrics, overlap_metrics, seam_metrics
 from gla_insid3.pipeline import canonicalize_binary_observations, canonicalize_tensor_observations
 from gla_insid3.windows import coverage_map, make_windows, stitch_scores, token_centers
@@ -106,6 +110,36 @@ class ReplayAndMetricTests(unittest.TestCase):
         delta = result["paired_delta_method_minus_baseline"]["A7"]["fg_iou"]
         self.assertAlmostEqual(delta["mean"], 0.2)
         self.assertEqual(delta["n"], 2)
+
+
+class ManifestReferenceTests(unittest.TestCase):
+    def test_reference_minimum_foreground_tokens(self) -> None:
+        class FakeStore:
+            def __init__(self) -> None:
+                small_a = np.zeros((8, 8), dtype=np.uint8); small_a[0, 0] = 1
+                small_b = np.zeros((8, 8), dtype=np.uint8); small_b[1, 1] = 1
+                large = np.zeros((8, 8), dtype=np.uint8); large[:4] = 1
+                self.labels = {"small_a": small_a, "small_b": small_b, "large": large}
+
+            def ids(self):
+                return sorted(self.labels)
+
+            def load_label(self, image_id):
+                return self.labels[image_id].copy()
+
+        self.assertEqual(
+            foreground_token_count(FakeStore().labels["large"], 8, 8), 32
+        )
+        with patch("pathlib.Path.open", mock_open()):
+            episodes = generate_manifest(
+                FakeStore(), Path("episodes.jsonl"),
+                fold=0, shots=1, num_episodes=1, crop=4, stride=4, seed=0,
+                cross_window_only=False, min_reference_tokens=10,
+                encoder_image_size=8, reference_feature_grid=8,
+            )
+        self.assertEqual(episodes[0].reference_image_ids, ["large"])
+        self.assertEqual(episodes[0].reference_foreground_tokens, [32])
+        self.assertEqual(episodes[0].min_reference_tokens, 10)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ class ReferenceState:
     raw_features: torch.Tensor
     debiased_features: torch.Tensor
     prototype: torch.Tensor
+    foreground_token_counts: list[int]
 
 
 @dataclass
@@ -54,16 +55,21 @@ def prepare_reference(model, images: list[Image.Image], masks: list[torch.Tensor
     _, shots, _, h, w = debiased.shape
     downsample_mask = _external_data_utils().downsample_mask
     prototypes = []
+    foreground_token_counts = []
     for shot in range(shots):
         mask = F.interpolate(mask_tensors[shot][None, None].float(), (model.image_size, model.image_size), mode="nearest") > 0.5
         down = downsample_mask(mask, h, w)
+        foreground_token_counts.append(int(down.sum().item()))
         foreground = debiased[0, shot, :, down]
         if foreground.shape[1]:
             prototypes.append(foreground.mean(dim=1))
     if not prototypes:
         raise RuntimeError("Reference foreground vanished at feature resolution")
     prototype = F.normalize(torch.stack(prototypes).mean(dim=0), dim=0).unsqueeze(1)
-    return ReferenceState(image_tensors, mask_tensors, raw, debiased, prototype)
+    return ReferenceState(
+        image_tensors, mask_tensors, raw, debiased, prototype,
+        foreground_token_counts,
+    )
 
 
 @torch.no_grad()

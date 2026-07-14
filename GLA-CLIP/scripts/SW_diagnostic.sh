@@ -20,6 +20,7 @@ cd "${EXP_DIR}"
   --methods B0,B1,B3 \
   --replays '' \
   --image-size 1024 \
+  --min-reference-tokens 20 \
   --early-max-tokens 4096 \
   --episode-limit "${EPISODE_LIMIT}" \
   --device cuda --window-batch-size 1 \

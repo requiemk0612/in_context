@@ -112,6 +112,8 @@ class PipelineSmokeTest(unittest.TestCase):
         self.assertEqual(tuple(stitched["stitched_score"].shape), (24, 24))
         self.assertEqual(int(stitched["coverage"].min()), 1)
         self.assertEqual(len(diagnostics), len(windows))
+        self.assertEqual(len(reference.foreground_token_counts), 1)
+        self.assertGreater(reference.foreground_token_counts[0], 0)
         self.assertEqual(tuple(early["continuous_score"].shape), (4, 4))
         self.assertEqual(early["early_fused_feature_hw"], (6, 6))
         self.assertEqual(early["early_reasoning_feature_hw"], (4, 4))
@@ -139,6 +141,7 @@ class PipelineSmokeTest(unittest.TestCase):
             topk=8, query_chunk=5, attention_temperature=1.0,
             enable_crf=False,
             seed=0,
+            min_reference_tokens=1,
         )
         methods = ["B0", "B1", "B2", "B3", *FACTORIAL]
         methods += ["R-D1", "R-D2", "R-D3", "R-D4", "R-D5"]

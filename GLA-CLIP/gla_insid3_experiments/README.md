@@ -33,6 +33,7 @@ python run_experiment.py \
   --data-root /data/lky/data/rs_seg \
   --manifest manifests/isaid_fold0_mvp.jsonl \
   --fold 0 --shots 1 --num-episodes 50 \
+  --min-reference-tokens 20 \
   --window-crop 512 --window-stride 256 --seed 0
 ```
 
@@ -49,10 +50,13 @@ python run_experiment.py \
   --output-dir outputs/isaid_fold0_mvp \
   --methods B0,B1,B2,B3,A1,A2,A3,A7 \
   --replays D1,D3,D4,D5 \
+  --min-reference-tokens 20 \
   --device cuda --window-batch-size 2
 ```
 
 默认会先对首个 crop 做 duplicate control；差异超过 `1e-5` 时立即停止。显存不足时优先减小 `--window-batch-size` 和 `--query-chunk`。B3/D4 的全局层次聚类近似二次复杂度，分别受 `--early-max-tokens` 和 `--d4-max-tokens` 限制。
+
+reference 会在 manifest 生成时按 INSID3 的实际 feature-mask 路径筛选，并在推理时二次校验。主脚本建议固定 `--min-reference-tokens 20`；若需降到 10，必须重新生成 manifest，并在所有方法中保持同一阈值。
 
 只跑 manifest 前 N 个 episode 可使用 `--episode-limit N`；`0` 表示全部。三条基础 baseline 的真实单 episode 检查可直接运行 `../scripts/SW_smoke.sh`。
 
