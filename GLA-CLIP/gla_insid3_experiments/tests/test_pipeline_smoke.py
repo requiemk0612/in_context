@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import types
 import unittest
@@ -22,7 +23,13 @@ from gla_insid3.pipeline import (
     run_early_reasoning,
 )
 from gla_insid3.windows import make_windows
-from run_experiment import _method_result, _reason_windows
+from run_experiment import (
+    _checkpoint_payload,
+    _evaluate_method,
+    _method_result,
+    _reason_windows,
+    _resolution_metadata,
+)
 
 
 def fake_external_modules() -> dict[str, types.ModuleType]:
@@ -100,12 +107,15 @@ class PipelineSmokeTest(unittest.TestCase):
                 for raw, semantic in zip(state.raw, aligned)
             ]
             stitched = I4_stitch_and_refine(model, target, results, windows, "uniform")
-            early = run_early_reasoning(model, reference, state, (24, 24), max_tokens=64)
+            early = run_early_reasoning(model, reference, state, (24, 24), max_tokens=16)
 
         self.assertEqual(tuple(stitched["stitched_score"].shape), (24, 24))
         self.assertEqual(int(stitched["coverage"].min()), 1)
         self.assertEqual(len(diagnostics), len(windows))
-        self.assertEqual(tuple(early["continuous_score"].shape), (6, 6))
+        self.assertEqual(tuple(early["continuous_score"].shape), (4, 4))
+        self.assertEqual(early["early_fused_feature_hw"], (6, 6))
+        self.assertEqual(early["early_reasoning_feature_hw"], (4, 4))
+        self.assertTrue(early["early_was_resized"])
         required = {
             "raw_feat", "debiased_feat", "sim_fwd", "nn_ref_index",
             "candidate_mask", "cluster_labels", "seed_id", "combined_score",
@@ -128,6 +138,7 @@ class PipelineSmokeTest(unittest.TestCase):
             fixed_gamma=3.0, dn_cutoff=0.0, token_bank="duplicate",
             topk=8, query_chunk=5, attention_temperature=1.0,
             enable_crf=False,
+            seed=0,
         )
         methods = ["B0", "B1", "B2", "B3", *FACTORIAL]
         methods += ["R-D1", "R-D2", "R-D3", "R-D4", "R-D5"]
@@ -142,6 +153,32 @@ class PipelineSmokeTest(unittest.TestCase):
                     )
                     self.assertTrue(results)
                     self.assertEqual(tuple(stitched["post_crf_mask"].shape), (24, 24))
+                    checkpoint = _checkpoint_payload(
+                        results, include_features=method not in {"B1", "B2"}
+                    )
+                    self.assertEqual(checkpoint["windows"][0]["continuous_score"].device.type, "cpu")
+                    if method == "B3":
+                        metadata = _resolution_metadata(
+                            method, model, state, results, state
+                        )
+                        self.assertEqual(metadata["early_max_tokens"], 64)
+                        self.assertEqual(metadata["reasoning_tokens_per_map"], [36])
+
+            episode = SimpleNamespace(
+                episode_id="smoke", fold=0, class_id=0,
+                target_foreground_fraction=float(mask.float().mean()),
+                target_windows_with_foreground=len(windows),
+            )
+            ignore = torch.zeros_like(mask)
+            for method in ("B0", "B1", "B3"):
+                evaluated = _evaluate_method(
+                    method, episode, model, reference, target, mask, ignore,
+                    state, args, base_results,
+                )
+                record, _, _, _, _ = evaluated
+                json.dumps(record, allow_nan=True)
+                self.assertEqual(record["encoder_input_hw"], [16, 16])
+                self.assertTrue(record["reasoning_tokens_per_map"])
 
 
 if __name__ == "__main__":

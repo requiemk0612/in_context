@@ -56,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--shots", type=int, default=1)
     parser.add_argument("--num-episodes", type=int, default=50)
+    parser.add_argument(
+        "--episode-limit", type=int, default=0,
+        help="Run only the first N manifest episodes; 0 runs all (use 1 for a real smoke test)",
+    )
     parser.add_argument("--window-crop", type=int, default=512)
     parser.add_argument("--window-stride", type=int, default=256)
     parser.add_argument("--include-single-window-targets", action="store_true")
@@ -125,14 +129,50 @@ def _reason_windows(model, reference, raw, semantic, clusters=None, candidates=N
     return results
 
 
-def _checkpoint_payload(results, aligned=None, diagnostics=None):
+def _to_cpu(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _to_cpu(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_to_cpu(item) for item in value)
+    return value
+
+
+def _checkpoint_payload(results, aligned=None, diagnostics=None, include_features: bool = True):
     keys = (
-        "raw_feat", "debiased_feat", "sim_fwd", "nn_ref_index", "backward_membership",
-        "candidate_mask", "cluster_labels", "cluster_prototypes", "seed_id", "cross_sim",
-        "intra_sim", "combined_score", "continuous_score", "pre_crf_mask",
+        "raw_feat", "debiased_feat", "sim_fwd", "forward_mask", "nn_ref_index",
+        "backward_membership", "backward_mask", "candidate_mask", "cluster_labels",
+        "cluster_prototypes", "seed_id", "cross_sim", "intra_sim", "area_weights",
+        "combined_score", "continuous_score", "pre_crf_mask", "early_feature_coverage",
+        "early_fused_feature_hw", "early_reasoning_feature_hw", "early_max_tokens",
+        "early_was_resized",
     )
-    payload = [{key: result[key] for key in keys} for result in results]
-    return {"windows": payload, "aligned": aligned, "attention": diagnostics}
+    if not include_features:
+        keys = tuple(key for key in keys if key not in {"raw_feat", "debiased_feat"})
+    payload = [{key: result[key] for key in keys if key in result} for result in results]
+    return _to_cpu({"windows": payload, "aligned": aligned, "attention": diagnostics})
+
+
+def _resolution_metadata(method: str, model, metric_state, results, source_state) -> dict[str, Any]:
+    reasoning_shapes = [tuple(result["continuous_score"].shape) for result in results]
+    metadata: dict[str, Any] = {
+        "method": method,
+        "encoder_input_hw": [int(model.image_size), int(model.image_size)],
+        "encoder_patch_size": 16,
+        "source_num_windows": len(source_state.windows),
+        "source_window_feature_hw": list(source_state.raw[0].shape[-2:]),
+        "reasoning_feature_hw": [list(shape) for shape in reasoning_shapes],
+        "reasoning_tokens_per_map": [int(height * width) for height, width in reasoning_shapes],
+    }
+    if method == "B3":
+        metadata.update({
+            "early_fused_feature_hw": list(results[0]["early_fused_feature_hw"]),
+            "early_max_tokens": int(results[0]["early_max_tokens"]),
+            "early_was_resized": bool(results[0]["early_was_resized"]),
+        })
+    metadata["method_num_windows"] = len(metric_state.windows) if method != "B3" else 1
+    return metadata
 
 
 @torch.no_grad()
@@ -240,6 +280,7 @@ def _evaluate_method(
     elapsed = time.perf_counter() - started
     prediction = stitched["post_crf_mask"]
     pre_crf_prediction = stitched["pre_crf_mask"]
+    source_state = metric_state if method == "B0" else state
     record: dict[str, Any] = {
         "episode_id": episode.episode_id,
         "fold": episode.fold,
@@ -256,7 +297,23 @@ def _evaluate_method(
         "score_variance_mean": float(stitched["score_variance"].mean().item()),
         "target_foreground_fraction": episode.target_foreground_fraction,
         "target_windows_with_foreground": episode.target_windows_with_foreground,
+        "encoder_input_hw": [int(model.image_size), int(model.image_size)],
+        "encoder_patch_size": 16,
+        "source_num_windows": len(source_state.windows),
+        "source_window_pixel_hw": [
+            [window.height, window.width] for window in source_state.windows
+        ],
+        "source_window_feature_hw": list(source_state.raw[0].shape[-2:]),
+        "reasoning_num_maps": len(results),
+        "reasoning_feature_hw": [list(item["continuous_score"].shape) for item in results],
+        "reasoning_tokens_per_map": [int(item["continuous_score"].numel()) for item in results],
     }
+    if method == "B3":
+        record.update({
+            "early_fused_feature_hw": list(results[0]["early_fused_feature_hw"]),
+            "early_max_tokens": int(results[0]["early_max_tokens"]),
+            "early_was_resized": bool(results[0]["early_was_resized"]),
+        })
     post_metrics = binary_metrics(prediction, target_mask, target_ignore)
     post_metrics["boundary_fscore"] = boundary_fscore(
         prediction, target_mask, ignore=target_ignore
@@ -296,7 +353,7 @@ def _evaluate_method(
         record.update(semantic_consistency)
     if attention:
         record.update(summarize_attention(attention))
-    return record, results, stitched, attention
+    return record, results, stitched, attention, metric_state
 
 
 def existing_keys(path: Path) -> set[tuple[str, str]]:
@@ -316,6 +373,8 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("window-batch-size, early-max-tokens, and d4-max-tokens must be positive")
     if args.duplicate_tolerance < 0:
         raise ValueError("duplicate-tolerance must be non-negative")
+    if args.episode_limit < 0:
+        raise ValueError("episode-limit must be non-negative")
     output_dir = artifact_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
@@ -339,6 +398,8 @@ def run(args: argparse.Namespace) -> None:
         raise RuntimeError(f"CUDA was requested ({args.device}) but torch.cuda.is_available() is false")
     manifest_path = artifact_path(args.manifest)
     episodes = load_manifest(manifest_path)
+    if args.episode_limit:
+        episodes = episodes[:args.episode_limit]
     store = ISAIDStore(args.data_root)
     model = build_model(
         args.insid3_root, model_size=args.model_size, image_size=args.image_size,
@@ -368,12 +429,42 @@ def run(args: argparse.Namespace) -> None:
                     f"Duplicate control exceeded tolerance {args.duplicate_tolerance}: {control}"
                 )
         state = I1_extract_windows(model, target, windows, args.device, args.window_batch_size)
+        checkpoint_dir = output_dir / "checkpoints" / episode.episode_id
+        if args.save_checkpoints:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            reference_path = checkpoint_dir / "reference.pt"
+            extraction_path = checkpoint_dir / "window_extraction.pt"
+            if not (args.resume and reference_path.exists()):
+                torch.save(_to_cpu({
+                    "episode": asdict(episode),
+                    "reference_image_ids": episode.reference_image_ids,
+                    "masks": reference.masks,
+                    "raw_features": reference.raw_features,
+                    "debiased_features": reference.debiased_features,
+                    "prototype": reference.prototype,
+                    "encoder_input_hw": [int(model.image_size), int(model.image_size)],
+                    "feature_hw": list(reference.raw_features.shape[-2:]),
+                }), reference_path)
+            if not (args.resume and extraction_path.exists()):
+                torch.save(_to_cpu({
+                    "episode": asdict(episode),
+                    "target_image_id": episode.target_image_id,
+                    "target_image_hw": [target.height, target.width],
+                    "encoder_input_hw_per_window": [int(model.image_size), int(model.image_size)],
+                    "encoder_patch_size": 16,
+                    "window_specs": [window.to_dict() for window in windows],
+                    "window_source_hw": [[window.height, window.width] for window in windows],
+                    "feature_hw": [list(feature.shape[-2:]) for feature in state.raw],
+                    "raw_features": state.raw,
+                    "debiased_features": state.debiased,
+                    "token_coordinates_xy": state.coordinates,
+                }), extraction_path)
         # B1 reasoning is the common structural/candidate checkpoint for all variants.
         base_results = _reason_windows(model, reference, state.raw, state.debiased)
         for method in methods:
             if (episode.episode_id, method) in done:
                 continue
-            record, results, stitched, attention = _evaluate_method(
+            record, results, stitched, attention, metric_state = _evaluate_method(
                 method, episode, model, reference, target, target_mask, target_ignore,
                 state, args, base_results,
             )
@@ -381,14 +472,28 @@ def run(args: argparse.Namespace) -> None:
                 handle.write(json.dumps(record, ensure_ascii=False, allow_nan=True) + "\n")
             print(json.dumps(record, ensure_ascii=False, allow_nan=True), flush=True)
             if args.save_checkpoints:
-                checkpoint_dir = output_dir / "checkpoints" / episode.episode_id
-                checkpoint_dir.mkdir(parents=True, exist_ok=True)
-                torch.save({
+                reasoning_windows = (
+                    [Window(0, 0, 0, target.width, target.height)]
+                    if method in {"B0", "B3"} else metric_state.windows
+                )
+                source_windows = (
+                    reasoning_windows if method == "B0" else state.windows
+                )
+                include_features = method not in {"B1", "B2", "B4", "B5"}
+                torch.save(_to_cpu({
                     "episode": asdict(episode),
-                    "window_specs": [window.to_dict() for window in windows],
-                    "states": _checkpoint_payload(results, None, attention),
+                    "method": method,
+                    "source_window_specs": [window.to_dict() for window in source_windows],
+                    "reasoning_window_specs": [window.to_dict() for window in reasoning_windows],
+                    "resolution": _resolution_metadata(
+                        method, model, metric_state, results,
+                        metric_state if method == "B0" else state,
+                    ),
+                    "states": _checkpoint_payload(
+                        results, None, attention, include_features=include_features
+                    ),
                     "stitched": stitched,
-                }, checkpoint_dir / f"{method}.pt")
+                }), checkpoint_dir / f"{method}.pt")
 
 
 def main() -> None:

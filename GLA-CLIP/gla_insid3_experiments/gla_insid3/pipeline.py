@@ -68,6 +68,10 @@ def prepare_reference(model, images: list[Image.Image], masks: list[torch.Tensor
 
 @torch.no_grad()
 def I1_extract_windows(model, target: Image.Image, windows: list[Window], device: str, batch_size: int = 2) -> WindowFeatures:
+    if not windows:
+        raise ValueError("windows cannot be empty")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
     crops = [target.crop((w.x1, w.y1, w.x2, w.y2)) for w in windows]
     raw_features: list[torch.Tensor] = []
     debiased_features: list[torch.Tensor] = []
@@ -217,9 +221,14 @@ def run_early_reasoning(
 ) -> dict[str, Any]:
     raw, raw_coverage = fuse_feature_windows(state.raw, state.windows, image_hw)
     semantic, _ = fuse_feature_windows(state.debiased, state.windows, image_hw)
+    fused_feature_hw = tuple(raw.shape[-2:])
     raw, semantic = limit_early_resolution(raw, semantic, max_tokens)
     result = I3_reason_per_window(model, reference, raw, semantic)
     result["early_feature_coverage"] = raw_coverage
+    result["early_fused_feature_hw"] = fused_feature_hw
+    result["early_reasoning_feature_hw"] = tuple(raw.shape[-2:])
+    result["early_max_tokens"] = int(max_tokens)
+    result["early_was_resized"] = fused_feature_hw != tuple(raw.shape[-2:])
     return result
 
 

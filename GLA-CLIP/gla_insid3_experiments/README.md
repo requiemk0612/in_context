@@ -54,6 +54,8 @@ python run_experiment.py \
 
 默认会先对首个 crop 做 duplicate control；差异超过 `1e-5` 时立即停止。显存不足时优先减小 `--window-batch-size` 和 `--query-chunk`。B3/D4 的全局层次聚类近似二次复杂度，分别受 `--early-max-tokens` 和 `--d4-max-tokens` 限制。
 
+只跑 manifest 前 N 个 episode 可使用 `--episode-limit N`；`0` 表示全部。三条基础 baseline 的真实单 episode 检查可直接运行 `../scripts/SW_smoke.sh`。
+
 中断后续跑使用同一输出目录并加 `--resume`。不加 `--resume` 时若 `metrics.jsonl` 已存在，脚本会拒绝追加，避免重复 episode 污染统计。
 
 ## 3. 完整 factorial
@@ -89,10 +91,12 @@ outputs/<run>/
   duplicate_control.json
   metrics.jsonl
   summary.json
-  checkpoints/<episode>/<method>.pt   # 仅 --save-checkpoints
+  checkpoints/<episode>/reference.pt          # 仅 --save-checkpoints
+  checkpoints/<episode>/window_extraction.pt  # 仅 --save-checkpoints
+  checkpoints/<episode>/<method>.pt           # 仅 --save-checkpoints
 ```
 
-checkpoint 暴露 raw/debiased feature、forward similarity、reference NN、backward membership、candidate、cluster、seed、cross/intra/combined score、continuous score 和 pre-CRF mask。默认不保存大型 tensor。
+checkpoint 暴露 raw/debiased feature、forward similarity、reference NN、backward membership、candidate、cluster、seed、cross/intra/combined score、continuous score 和 pre-CRF mask；同时保存输入/feature/reasoning 分辨率。大型 window feature 只在共享的 `window_extraction.pt` 保存一次，避免 B0/B1/B3 重复占用空间。
 
 ## 本地核心测试
 
