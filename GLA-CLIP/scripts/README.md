@@ -16,6 +16,17 @@ bash /data2/cld/in_context/GLA-CLIP/scripts/SW_smoke.sh
 bash /data2/cld/in_context/GLA-CLIP/scripts/SW_diagnostic.sh
 ```
 
+快速提取 B0/B1/B3 的 reference、forward/backward/candidate token 和核心指标：
+
+```bash
+python /data2/cld/in_context/GLA-CLIP/scripts/extract_diagnostics.py \
+  /data2/cld/in_context/GLA-CLIP/gla_insid3_experiments/outputs/SW_smoke_ref20/metrics.jsonl
+
+# 只显示 backward 或 candidate 全零的问题行
+python /data2/cld/in_context/GLA-CLIP/scripts/extract_diagnostics.py \
+  /path/to/metrics.jsonl --only-problems
+```
+
 可通过环境变量限制 episode 数或指定新输出目录：
 
 ```bash
