@@ -27,6 +27,20 @@ python /data2/cld/in_context/GLA-CLIP/scripts/extract_diagnostics.py \
   /path/to/metrics.jsonl --only-problems
 ```
 
+运行 A0–A7 全因子消融：
+
+```bash
+bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
+
+# 先跑 5 个 episode
+EPISODE_LIMIT=5 OUTPUT_DIR=outputs/A0_A7_smoke \
+  bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
+
+# 中断后续跑
+RESUME=1 OUTPUT_DIR=outputs/isaid_fold0_A0_A7_ref20 \
+  bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
+```
+
 可通过环境变量限制 episode 数或指定新输出目录：
 
 ```bash
