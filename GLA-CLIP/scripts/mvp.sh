@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXP_DIR="${SCRIPT_DIR}/../gla_insid3_experiments"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+WINDOW_BATCH_SIZE="${WINDOW_BATCH_SIZE:-2}"
 cd "${EXP_DIR}"
 
 "${PYTHON_BIN}" run_experiment.py \
@@ -17,4 +18,4 @@ cd "${EXP_DIR}"
  --min-reference-ratio 0.0 \
  --forward-gate-mode zero \
  --device cuda \
- --window-batch-size 1
+ --window-batch-size "${WINDOW_BATCH_SIZE}"

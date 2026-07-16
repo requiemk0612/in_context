@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXP_DIR="${SCRIPT_DIR}/../gla_insid3_experiments"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/SW_smoke}"
+WINDOW_BATCH_SIZE="${WINDOW_BATCH_SIZE:-2}"
 cd "${EXP_DIR}"
 
 # One real iSAID episode through all three requested baselines.
@@ -22,5 +23,5 @@ cd "${EXP_DIR}"
   --forward-gate-mode zero \
   --early-max-tokens 4096 \
   --episode-limit 1 \
-  --device cuda --window-batch-size 1 \
+  --device cuda --window-batch-size "${WINDOW_BATCH_SIZE}" \
   --save-checkpoints

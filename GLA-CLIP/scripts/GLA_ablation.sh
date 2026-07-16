@@ -17,6 +17,8 @@ FORWARD_MAX_POSITIVE_RATIO="${FORWARD_MAX_POSITIVE_RATIO:-0.95}"
 DN_LAMBDA2="${DN_LAMBDA2:-30}"
 MATCHING_DIAGNOSTICS="${MATCHING_DIAGNOSTICS:-0}"
 SAVE_CHECKPOINTS="${SAVE_CHECKPOINTS:-0}"
+WINDOW_BATCH_SIZE="${WINDOW_BATCH_SIZE:-2}"
+QUERY_CHUNK="${QUERY_CHUNK:-128}"
 RESUME="${RESUME:-0}"
 cd "${EXP_DIR}"
 
@@ -55,8 +57,8 @@ fi
   --forward-max-positive-ratio "${FORWARD_MAX_POSITIVE_RATIO}" \
   --fixed-beta 1.2 \
   --fixed-gamma 3.0 \
-  --query-chunk 128 \
+  --query-chunk "${QUERY_CHUNK}" \
   --episode-limit "${EPISODE_LIMIT}" \
   --device cuda \
-  --window-batch-size 1 \
+  --window-batch-size "${WINDOW_BATCH_SIZE}" \
   "${EXTRA_ARGS[@]}"

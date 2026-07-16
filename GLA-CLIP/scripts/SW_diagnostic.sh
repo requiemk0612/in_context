@@ -6,6 +6,7 @@ EXP_DIR="${SCRIPT_DIR}/../gla_insid3_experiments"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 EPISODE_LIMIT="${EPISODE_LIMIT:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/SW_diagnostic}"
+WINDOW_BATCH_SIZE="${WINDOW_BATCH_SIZE:-2}"
 cd "${EXP_DIR}"
 
 # B0: full image -> 1024 -> 64x64 reasoning
@@ -25,5 +26,5 @@ cd "${EXP_DIR}"
   --forward-gate-mode zero \
   --early-max-tokens 4096 \
   --episode-limit "${EPISODE_LIMIT}" \
-  --device cuda --window-batch-size 1 \
+  --device cuda --window-batch-size "${WINDOW_BATCH_SIZE}" \
   --save-checkpoints

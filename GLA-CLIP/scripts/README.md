@@ -43,6 +43,17 @@ bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
 第一次运行不设置 `RESUME`；只有同一份 v2 输出被中断后才使用
 `RESUME=1 OUTPUT_DIR=...`。
 
+窗口特征提取默认使用 `WINDOW_BATCH_SIZE=2`。若显存不足可回退：
+
+```bash
+WINDOW_BATCH_SIZE=1 bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
+```
+
+该参数只加速共享的 DINO window extraction，不改变结果口径，也不会显著
+加速后续每个方法的 dense KVE/matching。超参数 sweep 建议关闭昂贵诊断：
+`MATCHING_DIAGNOSTICS=0 SAVE_CHECKPOINTS=0`。显存充足时可额外尝试
+`QUERY_CHUNK=256`；它比继续增大 window batch 更直接作用于 attention 速度。
+
 # 原 baseline 运行顺序
 
 所有脚本都会自动切换到 `gla_insid3_experiments/`，因此既可以从 `GLA-CLIP/`，也可以从任意工作目录调用。
