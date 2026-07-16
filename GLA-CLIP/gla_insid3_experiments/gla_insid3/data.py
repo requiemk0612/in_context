@@ -39,8 +39,10 @@ class Episode:
     target_foreground_fraction: float | None = None
     target_total_windows: int | None = None
     reference_foreground_tokens: list[int] | None = None
+    reference_foreground_ratios: list[float] | None = None
     reference_feature_grid: int | None = None
     min_reference_tokens: int | None = None
+    min_reference_ratio: float | None = None
 
 
 class ISAIDStore:
@@ -139,6 +141,7 @@ def generate_manifest(
     seed: int,
     cross_window_only: bool = True,
     min_reference_tokens: int = 10,
+    min_reference_ratio: float = 0.0,
     encoder_image_size: int = 1024,
     reference_feature_grid: int = 64,
 ) -> list[Episode]:
@@ -148,6 +151,10 @@ def generate_manifest(
         raise ValueError("shots and num_episodes must be positive")
     if min_reference_tokens < 0:
         raise ValueError("min_reference_tokens must be non-negative")
+    if not 0.0 <= min_reference_ratio <= 1.0:
+        raise ValueError("min_reference_ratio must be in [0, 1]")
+    if encoder_image_size <= 0 or reference_feature_grid <= 0:
+        raise ValueError("encoder_image_size and reference_feature_grid must be positive")
     # Validate geometry before the potentially expensive label scan.
     make_windows(max(crop, 1), max(crop, 1), crop, stride)
     index = scan_class_index(store)
@@ -155,6 +162,7 @@ def generate_manifest(
     class_ids = list(range(fold * 5, fold * 5 + 5))
     targets: dict[int, list[tuple]] = {}
     reference_token_cache: dict[tuple[str, int], int] = {}
+    reference_grid_tokens = reference_feature_grid * reference_feature_grid
 
     def reference_tokens(image_id: str, class_id: int) -> int:
         key = (image_id, class_id)
@@ -196,12 +204,18 @@ def generate_manifest(
                 cursor[class_id] += 1
                 refs = [
                     item for item in index[class_id]
-                    if item != target and reference_tokens(item, class_id) >= min_reference_tokens
+                    if (
+                        item != target
+                        and reference_tokens(item, class_id) >= min_reference_tokens
+                        and reference_tokens(item, class_id) / reference_grid_tokens
+                        >= min_reference_ratio
+                    )
                 ]
                 if len(refs) < shots:
                     continue
                 references = rng.sample(refs, shots)
                 token_counts = [reference_tokens(item, class_id) for item in references]
+                token_ratios = [count / reference_grid_tokens for count in token_counts]
                 episodes.append(Episode(
                     episode_id=f"f{fold}-c{class_id:02d}-e{len(episodes):04d}",
                     fold=fold,
@@ -218,15 +232,21 @@ def generate_manifest(
                     target_foreground_fraction=foreground_fraction,
                     target_total_windows=total_windows,
                     reference_foreground_tokens=token_counts,
+                    reference_foreground_ratios=token_ratios,
                     reference_feature_grid=reference_feature_grid,
                     min_reference_tokens=min_reference_tokens,
+                    min_reference_ratio=min_reference_ratio,
                 ))
                 made_progress = True
                 break
         if not made_progress:
             break
     if len(episodes) < num_episodes:
-        raise RuntimeError(f"Only {len(episodes)} eligible episodes found; requested {num_episodes}")
+        raise RuntimeError(
+            f"Only {len(episodes)} eligible episodes found; requested {num_episodes} "
+            f"with reference >= {min_reference_tokens} tokens and >= "
+            f"{min_reference_ratio:.2%} foreground"
+        )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:

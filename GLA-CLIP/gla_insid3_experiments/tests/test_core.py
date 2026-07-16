@@ -8,10 +8,21 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from gla_insid3.aligner import AlignerConfig, FACTORIAL, align_feature_windows, factorial_config
+from gla_insid3.aligner import (
+    AlignerConfig,
+    FACTORIAL,
+    _attend,
+    align_feature_windows,
+    factorial_config,
+)
 from gla_insid3.data import foreground_token_count, generate_manifest
 from gla_insid3.metrics import binary_metrics, overlap_metrics, seam_metrics
-from gla_insid3.pipeline import canonicalize_binary_observations, canonicalize_tensor_observations
+from gla_insid3.pipeline import (
+    ForwardGateConfig,
+    apply_forward_gate,
+    canonicalize_binary_observations,
+    canonicalize_tensor_observations,
+)
 from gla_insid3.windows import coverage_map, make_windows, stitch_scores, token_centers
 from summarize_results import summarize
 
@@ -40,6 +51,31 @@ class WindowTests(unittest.TestCase):
 
 
 class AlignerTests(unittest.TestCase):
+    def test_cutoff_masks_duplicate_bank_before_softmax(self) -> None:
+        query = torch.tensor([[1.0, 0.0]])
+        bank = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        output, diagnostics = _attend(
+            query, bank, bank, torch.ones(2, dtype=torch.bool), 1,
+            AlignerConfig(dn_cutoff=0.0, token_bank="duplicate"),
+        )
+        self.assertTrue(torch.allclose(output, query))
+        self.assertAlmostEqual(float(diagnostics["mask_ratio"][0]), 0.5)
+        self.assertAlmostEqual(float(diagnostics["attention_top1_mass"][0]), 1.0)
+
+    def test_adaptive_forward_gate_caps_saturated_similarity(self) -> None:
+        similarity = torch.ones((2, 5))
+        faithful, faithful_rule, _ = apply_forward_gate(
+            similarity, ForwardGateConfig(mode="zero")
+        )
+        adaptive, adaptive_rule, _ = apply_forward_gate(
+            similarity,
+            ForwardGateConfig(mode="adaptive", quantile=0.9, max_positive_ratio=0.95),
+        )
+        self.assertEqual(int(faithful.sum()), 10)
+        self.assertEqual(faithful_rule, "zero")
+        self.assertEqual(int(adaptive.sum()), 1)
+        self.assertEqual(adaptive_rule, "adaptive_saturation_fallback")
+
     def test_all_factorial_variants(self) -> None:
         torch.manual_seed(0)
         windows = make_windows(6, 10, 6, 4)
@@ -135,11 +171,14 @@ class ManifestReferenceTests(unittest.TestCase):
                 FakeStore(), Path("episodes.jsonl"),
                 fold=0, shots=1, num_episodes=1, crop=4, stride=4, seed=0,
                 cross_window_only=False, min_reference_tokens=10,
+                min_reference_ratio=0.4,
                 encoder_image_size=8, reference_feature_grid=8,
             )
         self.assertEqual(episodes[0].reference_image_ids, ["large"])
         self.assertEqual(episodes[0].reference_foreground_tokens, [32])
+        self.assertEqual(episodes[0].reference_foreground_ratios, [0.5])
         self.assertEqual(episodes[0].min_reference_tokens, 10)
+        self.assertEqual(episodes[0].min_reference_ratio, 0.4)
 
 
 if __name__ == "__main__":

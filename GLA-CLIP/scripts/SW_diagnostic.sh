@@ -21,6 +21,8 @@ cd "${EXP_DIR}"
   --replays '' \
   --image-size 1024 \
   --min-reference-tokens 20 \
+  --min-reference-ratio 0.0 \
+  --forward-gate-mode zero \
   --early-max-tokens 4096 \
   --episode-limit "${EPISODE_LIMIT}" \
   --device cuda --window-batch-size 1 \

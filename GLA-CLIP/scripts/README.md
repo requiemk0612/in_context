@@ -1,4 +1,49 @@
-# 当前阶段运行顺序
+# 修复后推荐运行顺序（v2）
+
+旧版 A0–A7 结果使用了一个实现偏差：`dn_cutoff` 在默认
+`token-bank=duplicate` 下没有真正 mask attention logits。v2 已修复，因此
+**不要对旧输出目录使用 `RESUME=1`**。
+
+先验证 reference imbalance、forward saturation 和 KVE+DN 退化：
+
+```bash
+# 1. 本地接口测试
+bash /data2/cld/in_context/GLA-CLIP/scripts/unittest.sh
+
+# 2. 单独生成诊断 manifest：reference >=200 tokens 且占比 >=5%
+bash /data2/cld/in_context/GLA-CLIP/scripts/manifest_reference_diagnostic.sh
+
+# 3. 先只改变 reference 条件，forward gate 仍保持 faithful sim>0
+bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_reference_smoke.sh
+
+# 4. 快速检查空预测、forward saturation、FG/BG NN margin 和 attention collapse
+python /data2/cld/in_context/GLA-CLIP/scripts/extract_diagnostics.py \
+  /data2/cld/in_context/GLA-CLIP/gla_insid3_experiments/outputs/A0_A7_refdiag_v2_zero_smoke/metrics.jsonl \
+  --methods all --only-problems
+
+# 5. 仅当第 4 步仍显示 forward 空/饱和时，单独运行 adaptive gate 变体
+bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_diagnostic_smoke.sh
+```
+
+只有 smoke 不再大面积空预测后，才运行 DN 小范围扫描：
+
+```bash
+bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_dn_sweep.sh
+```
+
+上述 `ref>=200 / ratio>=5% / adaptive gate` 是**故障验证设置**，不能替代正式
+小目标评测。正式 factorial 仍使用预注册的 ref20 manifest 和 faithful
+`sim>0` gate：
+
+```bash
+bash /data2/cld/in_context/GLA-CLIP/scripts/manifest.sh
+bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
+```
+
+第一次运行不设置 `RESUME`；只有同一份 v2 输出被中断后才使用
+`RESUME=1 OUTPUT_DIR=...`。
+
+# 原 baseline 运行顺序
 
 所有脚本都会自动切换到 `gla_insid3_experiments/`，因此既可以从 `GLA-CLIP/`，也可以从任意工作目录调用。
 
@@ -27,17 +72,17 @@ python /data2/cld/in_context/GLA-CLIP/scripts/extract_diagnostics.py \
   /path/to/metrics.jsonl --only-problems
 ```
 
-运行 A0–A7 全因子消融：
+运行 faithful A0–A7 全因子消融（额外保存 B1 原始 late-SW 对照）：
 
 ```bash
 bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
 
 # 先跑 5 个 episode
-EPISODE_LIMIT=5 OUTPUT_DIR=outputs/A0_A7_smoke \
+EPISODE_LIMIT=5 OUTPUT_DIR=outputs/A0_A7_v2_smoke \
   bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
 
 # 中断后续跑
-RESUME=1 OUTPUT_DIR=outputs/isaid_fold0_A0_A7_ref20 \
+RESUME=1 OUTPUT_DIR=outputs/isaid_fold0_A0_A7_v2_ref20 \
   bash /data2/cld/in_context/GLA-CLIP/scripts/GLA_ablation.sh
 ```
 
@@ -50,8 +95,9 @@ EPISODE_LIMIT=5 OUTPUT_DIR=outputs/SW_diagnostic_5 \
 
 输出目录已经存在 `metrics.jsonl` 时程序会拒绝重复追加；请指定新 `OUTPUT_DIR`，或直接在命令行使用 `--resume`。
 
-`manifest.sh`、`SW_smoke.sh` 和 `SW_diagnostic.sh` 均固定
-`--min-reference-tokens 20`。token 数按 INSID3 实际的
+`manifest.sh` 默认固定 `--min-reference-tokens 20 --min-reference-ratio 0`；
+两个阈值都可用同名大写环境变量覆盖。`SW_smoke.sh` 和
+`SW_diagnostic.sh` 固定 faithful ref20 设置。token 数按 INSID3 实际的
 `原 mask → 1024×1024 → 64×64 feature mask` 路径计算。旧 manifest
 没有这项筛选，必须重新运行 `manifest.sh`；运行阶段也会再次计算并校验，
 若 reference 少于 20 tokens 会直接报出 image id 和实际 token 数。

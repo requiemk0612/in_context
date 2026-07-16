@@ -26,6 +26,7 @@ from gla_insid3.metrics import (
     summarize_attention,
 )
 from gla_insid3.pipeline import (
+    ForwardGateConfig,
     I1_extract_windows,
     I2_align_features,
     I3_reason_per_window,
@@ -72,6 +73,10 @@ def parse_args() -> argparse.Namespace:
         "--min-reference-tokens", type=int, default=10,
         help="Require this many foreground tokens per reference on the DINO feature grid",
     )
+    parser.add_argument(
+        "--min-reference-ratio", type=float, default=0.0,
+        help="Also require this foreground fraction per reference feature grid; 0 disables",
+    )
     parser.add_argument("--tau", type=float, default=0.6)
     parser.add_argument("--merge-thresh", type=float, default=0.2)
     parser.add_argument("--device", default="cuda")
@@ -88,6 +93,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-beta", type=float, default=1.2)
     parser.add_argument("--fixed-gamma", type=float, default=3.0)
     parser.add_argument("--dn-cutoff", type=float, default=0.0)
+    parser.add_argument(
+        "--forward-gate-mode", choices=("zero", "quantile", "adaptive"), default="zero",
+        help="zero is faithful INSID3; adaptive falls back when the zero gate is saturated",
+    )
+    parser.add_argument("--forward-quantile", type=float, default=0.9)
+    parser.add_argument("--forward-max-positive-ratio", type=float, default=0.95)
+    parser.add_argument(
+        "--matching-diagnostics", action="store_true",
+        help="Save foreground-vs-background NN margins (extra matching memory/time)",
+    )
     parser.add_argument("--attention-temperature", type=float, default=1.0)
     parser.add_argument("--query-chunk", type=int, default=128)
     parser.add_argument("--topk", type=int, default=256)
@@ -122,13 +137,19 @@ def set_determinism(seed: int) -> None:
         torch.use_deterministic_algorithms(True, warn_only=True)
 
 
-def _reason_windows(model, reference, raw, semantic, clusters=None, candidates=None):
+def _reason_windows(
+    model, reference, raw, semantic, clusters=None, candidates=None,
+    forward_gate: ForwardGateConfig | None = None,
+    collect_matching_diagnostics: bool = False,
+):
     results = []
     for index, (raw_feature, semantic_feature) in enumerate(zip(raw, semantic)):
         results.append(I3_reason_per_window(
             model, reference, raw_feature, semantic_feature,
             None if clusters is None else clusters[index],
             None if candidates is None else candidates[index],
+            forward_gate=forward_gate,
+            collect_matching_diagnostics=collect_matching_diagnostics,
         ))
     return results
 
@@ -146,6 +167,9 @@ def _to_cpu(value):
 def _checkpoint_payload(results, aligned=None, diagnostics=None, include_features: bool = True):
     keys = (
         "raw_feat", "debiased_feat", "sim_fwd", "forward_mask", "nn_ref_index",
+        "forward_gate_mode", "forward_gate_applied", "forward_gate_threshold",
+        "nn_best_similarity", "nn_foreground_max_similarity",
+        "nn_background_max_similarity", "nn_foreground_margin",
         "backward_membership", "backward_mask", "candidate_mask", "cluster_labels",
         "cluster_prototypes", "seed_id", "cross_sim", "intra_sim", "area_weights",
         "combined_score", "continuous_score", "pre_crf_mask", "early_feature_coverage",
@@ -179,6 +203,70 @@ def _resolution_metadata(method: str, model, metric_state, results, source_state
     return metadata
 
 
+def _forward_gate_config(args) -> ForwardGateConfig:
+    return ForwardGateConfig(
+        mode=args.forward_gate_mode,
+        quantile=args.forward_quantile,
+        max_positive_ratio=args.forward_max_positive_ratio,
+    )
+
+
+def _spatial_dispersion(feature: torch.Tensor) -> float:
+    """Cheap collapse diagnostic: 0 means all normalized spatial tokens coincide."""
+    tokens = torch.nn.functional.normalize(feature.flatten(1).T.float(), dim=1)
+    centroid = tokens.mean(dim=0)
+    return float((1.0 - centroid.square().sum()).clamp(0.0, 1.0).item())
+
+
+def _reasoning_diagnostics(results: list[dict[str, Any]]) -> dict[str, Any]:
+    similarity_min, similarity_mean, similarity_median = [], [], []
+    similarity_q90, similarity_max = [], []
+    forward_fraction, backward_hit_fraction = [], []
+    nn_unique, nn_dominant_fraction = [], []
+    margin_mean, margin_positive_fraction = [], []
+    raw_dispersion, semantic_dispersion = [], []
+    for result in results:
+        similarity = result["sim_fwd"].float().reshape(-1)
+        similarity_min.append(float(similarity.min().item()))
+        similarity_mean.append(float(similarity.mean().item()))
+        similarity_median.append(float(torch.quantile(similarity, 0.5).item()))
+        similarity_q90.append(float(torch.quantile(similarity, 0.9).item()))
+        similarity_max.append(float(similarity.max().item()))
+        forward_fraction.append(float(result["forward_mask"].float().mean().item()))
+        backward_hit_fraction.append(float(result["backward_membership"].float().mean().item()))
+        unique_per_shot, dominant_per_shot = [], []
+        for indices in result["nn_ref_index"]:
+            flat = indices.reshape(-1).long()
+            counts = torch.bincount(flat)
+            unique_per_shot.append(float((counts > 0).sum().item()))
+            dominant_per_shot.append(float(counts.max().item() / max(flat.numel(), 1)))
+        nn_unique.append(float(np.mean(unique_per_shot)))
+        nn_dominant_fraction.append(float(np.mean(dominant_per_shot)))
+        if "nn_foreground_margin" in result:
+            margin = result["nn_foreground_margin"].float()
+            margin_mean.append(float(margin.mean().item()))
+            margin_positive_fraction.append(float((margin > 0).float().mean().item()))
+        raw_dispersion.append(_spatial_dispersion(result["raw_feat"]))
+        semantic_dispersion.append(_spatial_dispersion(result["debiased_feat"]))
+    return {
+        "forward_gate_applied_per_map": [result["forward_gate_applied"] for result in results],
+        "forward_gate_threshold_per_map": [float(result["forward_gate_threshold"]) for result in results],
+        "forward_similarity_min_per_map": similarity_min,
+        "forward_similarity_mean_per_map": similarity_mean,
+        "forward_similarity_median_per_map": similarity_median,
+        "forward_similarity_q90_per_map": similarity_q90,
+        "forward_similarity_max_per_map": similarity_max,
+        "forward_positive_fraction_per_map": forward_fraction,
+        "backward_foreground_hit_fraction_per_map": backward_hit_fraction,
+        "nn_unique_reference_tokens_per_map": nn_unique,
+        "nn_dominant_reference_token_fraction_per_map": nn_dominant_fraction,
+        "nn_foreground_margin_mean_per_map": margin_mean,
+        "nn_foreground_margin_positive_fraction_per_map": margin_positive_fraction,
+        "raw_spatial_dispersion_per_map": raw_dispersion,
+        "semantic_spatial_dispersion_per_map": semantic_dispersion,
+    }
+
+
 @torch.no_grad()
 def duplicate_control(model, target, window: Window, device: str) -> dict[str, float]:
     duplicate_windows = [
@@ -194,6 +282,8 @@ def duplicate_control(model, target, window: Window, device: str) -> dict[str, f
 
 def _method_result(method: str, model, reference, target, state, args, base_results):
     attention = None
+    forward_gate = _forward_gate_config(args)
+    matching_diagnostics = args.matching_diagnostics
     semantics = state.debiased
     raw = state.raw
     clusters = [result["cluster_labels"] for result in base_results]
@@ -202,13 +292,21 @@ def _method_result(method: str, model, reference, target, state, args, base_resu
     if method == "B0":
         full_window = [Window(0, 0, 0, target.width, target.height)]
         full_state = I1_extract_windows(model, target, full_window, args.device, 1)
-        results = _reason_windows(model, reference, full_state.raw, full_state.debiased)
+        results = _reason_windows(
+            model, reference, full_state.raw, full_state.debiased,
+            forward_gate=forward_gate,
+            collect_matching_diagnostics=matching_diagnostics,
+        )
         stitched = I4_stitch_and_refine(model, target, results, full_window, "uniform")
         return results, full_state, stitched, attention
     if method == "B2":
         stitch_mode = "hann"
     elif method == "B3":
-        result = run_early_reasoning(model, reference, state, (target.height, target.width), args.early_max_tokens)
+        result = run_early_reasoning(
+            model, reference, state, (target.height, target.width), args.early_max_tokens,
+            forward_gate=forward_gate,
+            collect_matching_diagnostics=matching_diagnostics,
+        )
         full_window = [Window(0, 0, 0, target.width, target.height)]
         stitched = I4_stitch_and_refine(model, target, [result], full_window, "uniform")
         return [result], state, stitched, attention
@@ -236,20 +334,35 @@ def _method_result(method: str, model, reference, target, state, args, base_resu
             raw = canonicalize_tensor_observations(state.raw, state.coordinates, args.coordinate_quantum)
             stacked = torch.stack(raw).unsqueeze(0)
             semantics = [item for item in model._debias_features(stacked)[0]]
-            results = _reason_windows(model, reference, raw, semantics)
+            results = _reason_windows(
+                model, reference, raw, semantics, forward_gate=forward_gate,
+                collect_matching_diagnostics=matching_diagnostics,
+            )
         elif stage == "D2":
             semantics = canonicalize_tensor_observations(state.debiased, state.coordinates, args.coordinate_quantum)
-            results = _reason_windows(model, reference, raw, semantics, clusters)
+            results = _reason_windows(
+                model, reference, raw, semantics, clusters,
+                forward_gate=forward_gate,
+                collect_matching_diagnostics=matching_diagnostics,
+            )
         elif stage == "D3":
             candidates = canonicalize_binary_observations(
                 [item["candidate_mask"] for item in base_results], state.coordinates, args.coordinate_quantum
             )
-            results = _reason_windows(model, reference, raw, semantics, clusters, candidates)
+            results = _reason_windows(
+                model, reference, raw, semantics, clusters, candidates,
+                forward_gate=forward_gate,
+                collect_matching_diagnostics=matching_diagnostics,
+            )
         elif stage == "D4":
             canonical_clusters = canonicalize_cluster_observations(
                 raw, state.coordinates, model.tau, args.coordinate_quantum, args.d4_max_tokens
             )
-            results = _reason_windows(model, reference, raw, semantics, canonical_clusters)
+            results = _reason_windows(
+                model, reference, raw, semantics, canonical_clusters,
+                forward_gate=forward_gate,
+                collect_matching_diagnostics=matching_diagnostics,
+            )
         elif stage == "D5":
             canonical_scores = canonicalize_tensor_observations(
                 [item["continuous_score"] for item in base_results], state.coordinates, args.coordinate_quantum
@@ -263,7 +376,11 @@ def _method_result(method: str, model, reference, target, state, args, base_resu
     elif method != "B1":
         raise KeyError(f"Unknown method: {method}")
 
-    results = _reason_windows(model, reference, raw, semantics, clusters)
+    results = _reason_windows(
+        model, reference, raw, semantics, clusters,
+        forward_gate=forward_gate,
+        collect_matching_diagnostics=matching_diagnostics,
+    )
     stitched = I4_stitch_and_refine(
         model, target, results, state.windows, stitch_mode,
         global_crf=global_crf, per_window_crf=per_window_crf,
@@ -285,6 +402,14 @@ def _evaluate_method(
     prediction = stitched["post_crf_mask"]
     pre_crf_prediction = stitched["pre_crf_mask"]
     source_state = metric_state if method == "B0" else state
+    target_window_foreground_fractions = []
+    valid_target = ~target_ignore.bool()
+    for window in state.windows:
+        foreground = target_mask[window.y1:window.y2, window.x1:window.x2]
+        valid = valid_target[window.y1:window.y2, window.x1:window.x2]
+        target_window_foreground_fractions.append(float(
+            (foreground & valid).sum().item() / max(int(valid.sum().item()), 1)
+        ))
     record: dict[str, Any] = {
         "episode_id": episode.episode_id,
         "fold": episode.fold,
@@ -301,8 +426,17 @@ def _evaluate_method(
         "score_variance_mean": float(stitched["score_variance"].mean().item()),
         "target_foreground_fraction": episode.target_foreground_fraction,
         "target_windows_with_foreground": episode.target_windows_with_foreground,
+        "target_total_windows": getattr(episode, "target_total_windows", len(state.windows)),
+        "target_window_foreground_fraction": target_window_foreground_fractions,
         "reference_foreground_tokens": reference.foreground_token_counts,
+        "reference_foreground_ratios": reference.foreground_token_ratios,
         "min_reference_tokens": args.min_reference_tokens,
+        "min_reference_ratio": args.min_reference_ratio,
+        "reference_grid_tokens": int(reference.debiased_features.shape[-2] * reference.debiased_features.shape[-1]),
+        "forward_gate_mode": args.forward_gate_mode,
+        "forward_quantile": args.forward_quantile,
+        "forward_max_positive_ratio": args.forward_max_positive_ratio,
+        "matching_diagnostics": bool(args.matching_diagnostics),
         "encoder_input_hw": [int(model.image_size), int(model.image_size)],
         "encoder_patch_size": 16,
         "source_num_windows": len(source_state.windows),
@@ -322,7 +456,20 @@ def _evaluate_method(
         "candidate_tokens_per_map": [
             int(item["candidate_mask"].sum().item()) for item in results
         ],
+        "pre_crf_foreground_fraction": float(pre_crf_prediction.float().mean().item()),
+        "post_crf_foreground_fraction": float(prediction.float().mean().item()),
+        "empty_prediction": not bool(prediction.any().item()),
     }
+    record.update(_reasoning_diagnostics(results))
+    if method not in {"B0", "B3"} and len(results) == len(state.debiased):
+        record["semantic_input_cosine_mean_per_map"] = [
+            float(torch.nn.functional.cosine_similarity(
+                result["debiased_feat"].float(), original.float(), dim=0
+            ).mean().item())
+            for result, original in zip(results, state.debiased)
+        ]
+    else:
+        record["semantic_input_cosine_mean_per_map"] = []
     if method == "B3":
         record.update({
             "early_fused_feature_hw": list(results[0]["early_fused_feature_hw"]),
@@ -390,8 +537,12 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("duplicate-tolerance must be non-negative")
     if args.min_reference_tokens < 0:
         raise ValueError("min-reference-tokens must be non-negative")
+    if not 0.0 <= args.min_reference_ratio <= 1.0:
+        raise ValueError("min-reference-ratio must be in [0, 1]")
     if args.episode_limit < 0:
         raise ValueError("episode-limit must be non-negative")
+    # Validate the forward-gate parameters before loading the model or data.
+    forward_gate = _forward_gate_config(args)
     output_dir = artifact_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
@@ -438,18 +589,24 @@ def run(args: argparse.Namespace) -> None:
         reference_masks = [store.binary_mask(item, episode.class_id) for item in episode.reference_image_ids]
         reference = prepare_reference(model, reference_images, reference_masks, args.device)
         insufficient = [
-            (image_id, count)
-            for image_id, count in zip(
-                episode.reference_image_ids, reference.foreground_token_counts
+            (image_id, count, ratio)
+            for image_id, count, ratio in zip(
+                episode.reference_image_ids,
+                reference.foreground_token_counts,
+                reference.foreground_token_ratios,
             )
-            if count < args.min_reference_tokens
+            if count < args.min_reference_tokens or ratio < args.min_reference_ratio
         ]
         if insufficient:
-            details = ", ".join(f"{image_id}={count}" for image_id, count in insufficient)
+            details = ", ".join(
+                f"{image_id}={count} ({ratio:.2%})"
+                for image_id, count, ratio in insufficient
+            )
             raise RuntimeError(
                 f"Episode {episode.episode_id} has undersized reference foreground "
-                f"({details} tokens; required >= {args.min_reference_tokens}). "
-                "Regenerate the manifest with the same --min-reference-tokens."
+                f"({details}; required >= {args.min_reference_tokens} tokens and "
+                f">= {args.min_reference_ratio:.2%}). Regenerate the manifest with "
+                "the same reference thresholds."
             )
         windows = make_windows(target.height, target.width, episode.window_crop, episode.window_stride)
         if episode_index == 0 and not args.skip_duplicate_control:
@@ -474,7 +631,9 @@ def run(args: argparse.Namespace) -> None:
                     "debiased_features": reference.debiased_features,
                     "prototype": reference.prototype,
                     "foreground_token_counts": reference.foreground_token_counts,
+                    "foreground_token_ratios": reference.foreground_token_ratios,
                     "min_reference_tokens": args.min_reference_tokens,
+                    "min_reference_ratio": args.min_reference_ratio,
                     "encoder_input_hw": [int(model.image_size), int(model.image_size)],
                     "feature_hw": list(reference.raw_features.shape[-2:]),
                 }), reference_path)
@@ -493,7 +652,11 @@ def run(args: argparse.Namespace) -> None:
                     "token_coordinates_xy": state.coordinates,
                 }), extraction_path)
         # B1 reasoning is the common structural/candidate checkpoint for all variants.
-        base_results = _reason_windows(model, reference, state.raw, state.debiased)
+        base_results = _reason_windows(
+            model, reference, state.raw, state.debiased,
+            forward_gate=forward_gate,
+            collect_matching_diagnostics=args.matching_diagnostics,
+        )
         for method in methods:
             if (episode.episode_id, method) in done:
                 continue
@@ -538,6 +701,7 @@ def main() -> None:
             args.num_episodes, args.window_crop, args.window_stride, args.seed,
             cross_window_only=not args.include_single_window_targets,
             min_reference_tokens=args.min_reference_tokens,
+            min_reference_ratio=args.min_reference_ratio,
             encoder_image_size=args.image_size,
             reference_feature_grid=args.image_size // 16,
         )

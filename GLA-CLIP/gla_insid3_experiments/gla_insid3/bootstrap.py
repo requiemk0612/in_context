@@ -61,7 +61,7 @@ def implementation_manifest(
             return None
 
     return {
-        "format_version": 1,
+        "format_version": 2,
         "arguments": args,
         "files": {
             str(path): sha256_file(path) for path in tracked if path.is_file()
@@ -69,6 +69,8 @@ def implementation_manifest(
         "notes": {
             "positional_basis": "INSID3 current zero-image basis",
             "forward_gate": True,
+            "forward_gate_mode": args.get("forward_gate_mode", "zero"),
+            "attention_cutoff_before_softmax": True,
             "area_weight": True,
             "clustering_spatial_connectivity": False,
             "network_required": False,

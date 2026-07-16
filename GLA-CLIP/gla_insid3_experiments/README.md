@@ -34,6 +34,7 @@ python run_experiment.py \
   --manifest manifests/isaid_fold0_mvp.jsonl \
   --fold 0 --shots 1 --num-episodes 50 \
   --min-reference-tokens 20 \
+  --min-reference-ratio 0 \
   --window-crop 512 --window-stride 256 --seed 0
 ```
 
@@ -58,6 +59,15 @@ python run_experiment.py \
 
 reference 会在 manifest 生成时按 INSID3 的实际 feature-mask 路径筛选，并在推理时二次校验。主脚本建议固定 `--min-reference-tokens 20`；若需降到 10，必须重新生成 manifest，并在所有方法中保持同一阈值。
 
+`--min-reference-ratio` 可同时按 64×64 reference grid 的前景占比筛选。
+`scripts/manifest_reference_diagnostic.sh` 使用 `>=200 tokens` 且 `>=5%`，只用于
+验证 reference/background imbalance，不替代正式 small-object manifest。
+
+forward gate 提供三个显式口径：`zero`（原始 INSID3 的 `sim>0`）、
+`quantile`（固定 top fraction）与 `adaptive`（仅在 zero gate 为空或饱和时
+回退）。正式主结果固定 `zero`；诊断 smoke 使用
+`adaptive --forward-quantile 0.9 --forward-max-positive-ratio 0.95`。
+
 只跑 manifest 前 N 个 episode 可使用 `--episode-limit N`；`0` 表示全部。三条基础 baseline 的真实单 episode 检查可直接运行 `../scripts/SW_smoke.sh`。
 
 中断后续跑使用同一输出目录并加 `--resume`。不加 `--resume` 时若 `metrics.jsonl` 已存在，脚本会拒绝追加，避免重复 episode 污染统计。
@@ -73,6 +83,15 @@ python run_experiment.py \
   --replays '' \
   --token-bank duplicate
 ```
+
+当前 v2 已修复 DN/fixed normalization 的 cutoff：所有 token-bank 都会在
+softmax 前把未通过的 logits 置为 `-inf`。修复前的 A0–A7 指标不可与 v2
+混合或使用 `--resume` 继续追加。
+
+`--matching-diagnostics` 会额外保存每个 target token 对 reference 前景/背景
+的最大相似度与 margin，适合 smoke/checkpoint 调试；正式全量运行默认关闭，
+以避免额外显存和时间开销。常规 JSONL 仍会记录 forward 分布、NN 命中率、
+reference-index 集中度、空间特征 dispersion、attention entropy/top-1 mass。
 
 遥感扩展 bank 可通过 `--token-bank deduplicated` 或 `--token-bank topk --topk 256` 单独运行。主 factorial 应固定同一 bank、窗口、episode、threshold 和 stitch 设置。
 

@@ -11,8 +11,10 @@ cd "${EXP_DIR}"
  --insid3-root /data2/cld/in_context/INSID3-main \
  --data-root /data/lky/data/rs_seg \
  --manifest manifests/isaid_fold0_mvp.jsonl \
- --output-dir outputs/test \
+ --output-dir outputs/mvp_v2 \
  --methods B0,B1,B2,B3,A0,A7 \
  --min-reference-tokens 20 \
+ --min-reference-ratio 0.0 \
+ --forward-gate-mode zero \
  --device cuda \
  --window-batch-size 1

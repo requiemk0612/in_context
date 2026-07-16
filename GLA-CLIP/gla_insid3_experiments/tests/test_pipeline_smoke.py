@@ -15,6 +15,7 @@ from PIL import Image
 from gla_insid3.aligner import AlignerConfig
 from gla_insid3.aligner import FACTORIAL
 from gla_insid3.pipeline import (
+    ForwardGateConfig,
     I1_extract_windows,
     I2_align_features,
     I3_reason_per_window,
@@ -103,7 +104,11 @@ class PipelineSmokeTest(unittest.TestCase):
                 ),
             )
             results = [
-                I3_reason_per_window(model, reference, raw, semantic)
+                I3_reason_per_window(
+                    model, reference, raw, semantic,
+                    forward_gate=ForwardGateConfig(mode="adaptive"),
+                    collect_matching_diagnostics=True,
+                )
                 for raw, semantic in zip(state.raw, aligned)
             ]
             stitched = I4_stitch_and_refine(model, target, results, windows, "uniform")
@@ -114,12 +119,14 @@ class PipelineSmokeTest(unittest.TestCase):
         self.assertEqual(len(diagnostics), len(windows))
         self.assertEqual(len(reference.foreground_token_counts), 1)
         self.assertGreater(reference.foreground_token_counts[0], 0)
+        self.assertGreater(reference.foreground_token_ratios[0], 0)
         self.assertEqual(tuple(early["continuous_score"].shape), (4, 4))
         self.assertEqual(early["early_fused_feature_hw"], (6, 6))
         self.assertEqual(early["early_reasoning_feature_hw"], (4, 4))
         self.assertTrue(early["early_was_resized"])
         required = {
             "raw_feat", "debiased_feat", "sim_fwd", "nn_ref_index",
+            "nn_foreground_margin", "forward_gate_applied",
             "candidate_mask", "cluster_labels", "seed_id", "combined_score",
             "continuous_score", "pre_crf_mask",
         }
@@ -142,6 +149,11 @@ class PipelineSmokeTest(unittest.TestCase):
             enable_crf=False,
             seed=0,
             min_reference_tokens=1,
+            min_reference_ratio=0.0,
+            forward_gate_mode="zero",
+            forward_quantile=0.9,
+            forward_max_positive_ratio=0.95,
+            matching_diagnostics=True,
         )
         methods = ["B0", "B1", "B2", "B3", *FACTORIAL]
         methods += ["R-D1", "R-D2", "R-D3", "R-D4", "R-D5"]
@@ -173,7 +185,7 @@ class PipelineSmokeTest(unittest.TestCase):
                 target_windows_with_foreground=len(windows),
             )
             ignore = torch.zeros_like(mask)
-            for method in ("B0", "B1", "B3"):
+            for method in ("B0", "B1", "B3", "A7"):
                 evaluated = _evaluate_method(
                     method, episode, model, reference, target, mask, ignore,
                     state, args, base_results,
@@ -182,6 +194,13 @@ class PipelineSmokeTest(unittest.TestCase):
                 json.dumps(record, allow_nan=True)
                 self.assertEqual(record["encoder_input_hw"], [16, 16])
                 self.assertTrue(record["reasoning_tokens_per_map"])
+                self.assertTrue(record["forward_positive_fraction_per_map"])
+                self.assertTrue(record["nn_foreground_margin_mean_per_map"])
+                self.assertEqual(record["reference_foreground_ratios"], reference.foreground_token_ratios)
+                if method == "A7":
+                    self.assertIn("attention_entropy_mean", record)
+                    self.assertIn("attention_top1_mass_mean", record)
+                    self.assertIn("attention_feature_drift_mean", record)
 
 
 if __name__ == "__main__":

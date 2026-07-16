@@ -272,8 +272,10 @@ def summarize_attention(diagnostics: list[dict[str, torch.Tensor]]) -> dict[str,
     result = {}
     for key in (
         "positive_count", "proxy_drift", "dn_u", "dn_w", "mask_ratio",
-        "attention_entropy", "outer_positive_ratio", "outer_attention_mass",
+        "attention_entropy", "attention_top1_mass", "attention_effective_tokens",
+        "feature_drift", "outer_positive_ratio", "outer_attention_mass",
     ):
         values = torch.cat([item[key].float().cpu() for item in diagnostics])
-        result[f"attention_{key}_mean"] = float(values.mean().item())
+        metric_name = key if key.startswith("attention_") else f"attention_{key}"
+        result[f"{metric_name}_mean"] = float(values.mean().item())
     return result

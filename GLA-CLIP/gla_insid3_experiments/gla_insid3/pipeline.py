@@ -24,6 +24,24 @@ class ReferenceState:
     debiased_features: torch.Tensor
     prototype: torch.Tensor
     foreground_token_counts: list[int]
+    foreground_token_ratios: list[float]
+
+
+@dataclass(frozen=True)
+class ForwardGateConfig:
+    """Configurable forward gate with a faithful INSID3 default."""
+
+    mode: str = "zero"
+    quantile: float = 0.9
+    max_positive_ratio: float = 0.95
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"zero", "quantile", "adaptive"}:
+            raise ValueError(f"Unsupported forward gate mode: {self.mode}")
+        if not 0.0 <= self.quantile < 1.0:
+            raise ValueError("forward gate quantile must be in [0, 1)")
+        if not 0.0 < self.max_positive_ratio <= 1.0:
+            raise ValueError("forward max-positive ratio must be in (0, 1]")
 
 
 @dataclass
@@ -56,10 +74,13 @@ def prepare_reference(model, images: list[Image.Image], masks: list[torch.Tensor
     downsample_mask = _external_data_utils().downsample_mask
     prototypes = []
     foreground_token_counts = []
+    foreground_token_ratios = []
     for shot in range(shots):
         mask = F.interpolate(mask_tensors[shot][None, None].float(), (model.image_size, model.image_size), mode="nearest") > 0.5
         down = downsample_mask(mask, h, w)
-        foreground_token_counts.append(int(down.sum().item()))
+        foreground_count = int(down.sum().item())
+        foreground_token_counts.append(foreground_count)
+        foreground_token_ratios.append(foreground_count / float(h * w))
         foreground = debiased[0, shot, :, down]
         if foreground.shape[1]:
             prototypes.append(foreground.mean(dim=1))
@@ -68,7 +89,7 @@ def prepare_reference(model, images: list[Image.Image], masks: list[torch.Tensor
     prototype = F.normalize(torch.stack(prototypes).mean(dim=0), dim=0).unsqueeze(1)
     return ReferenceState(
         image_tensors, mask_tensors, raw, debiased, prototype,
-        foreground_token_counts,
+        foreground_token_counts, foreground_token_ratios,
     )
 
 
@@ -106,6 +127,38 @@ def _cluster(raw_feature: torch.Tensor, tau: float) -> torch.Tensor:
     return _external_clustering().agglomerative_clustering(flat, tau).reshape(h, w)
 
 
+def apply_forward_gate(
+    similarity: torch.Tensor,
+    config: ForwardGateConfig,
+) -> tuple[torch.Tensor, str, float]:
+    """Return a forward mask, the applied rule, and its effective threshold.
+
+    ``zero`` preserves INSID3's ``similarity > 0`` rule. ``quantile`` keeps an
+    exact top fraction, while ``adaptive`` only switches to that rule when the
+    zero gate is empty or saturated. Exact top-k selection avoids a constant
+    similarity map turning a quantile gate back into an all-positive mask.
+    """
+    flat = similarity.reshape(-1)
+
+    def top_fraction(rule: str) -> tuple[torch.Tensor, str, float]:
+        count = max(1, math.ceil((1.0 - config.quantile) * flat.numel()))
+        values, indices = flat.topk(min(count, flat.numel()))
+        selected = torch.zeros_like(flat, dtype=torch.bool)
+        selected[indices] = True
+        return selected.reshape_as(similarity), rule, float(values.min().item())
+
+    if config.mode == "quantile":
+        return top_fraction("quantile")
+
+    positive = similarity > 0
+    positive_ratio = float(positive.float().mean().item())
+    if not positive.any():
+        return top_fraction(f"{config.mode}_empty_fallback")
+    if config.mode == "adaptive" and positive_ratio > config.max_positive_ratio:
+        return top_fraction("adaptive_saturation_fallback")
+    return positive, "zero", 0.0
+
+
 @torch.no_grad()
 def I3_reason_per_window(
     model,
@@ -114,6 +167,8 @@ def I3_reason_per_window(
     semantic_feature: torch.Tensor,
     cluster_labels: torch.Tensor | None = None,
     candidate_override: torch.Tensor | None = None,
+    forward_gate: ForwardGateConfig | None = None,
+    collect_matching_diagnostics: bool = False,
 ) -> dict[str, Any]:
     """Expose candidate, cluster, seed, and continuous aggregation states."""
     c, h, w = raw_feature.shape
@@ -121,27 +176,45 @@ def I3_reason_per_window(
     feat_sem = semantic_feature.unsqueeze(0)
     prototype = reference.prototype.to(device=semantic_feature.device, dtype=semantic_feature.dtype)
     sim_fwd = torch.einsum("bchw,cd->bhw", feat_sem, prototype).squeeze(0)
-    forward_mask = sim_fwd > 0
-    if forward_mask.sum() == 0:
-        forward_mask = sim_fwd > torch.quantile(sim_fwd, 0.9)
+    gate_config = forward_gate or ForwardGateConfig()
+    forward_mask, forward_gate_applied, forward_gate_threshold = apply_forward_gate(
+        sim_fwd, gate_config
+    )
 
     shots = reference.debiased_features.shape[1]
     votes = torch.zeros((h, w), dtype=torch.int32, device=semantic_feature.device)
     nn_indices = []
+    nn_best_similarities = []
     backward_memberships = []
+    foreground_max_similarities = []
+    background_max_similarities = []
+    foreground_margins = []
     downsample_mask = _external_data_utils().downsample_mask
     tgt_flat = semantic_feature.flatten(1).T
     for shot in range(shots):
         ref = reference.debiased_features[0, shot].to(semantic_feature.dtype)
         ref_flat = ref.flatten(1).T
-        best_idx = (tgt_flat @ ref_flat.T).argmax(dim=1).reshape(h, w)
         rh, rw = ref.shape[1:]
         mask_input = F.interpolate(reference.masks[shot][None, None].float(), (model.image_size, model.image_size), mode="nearest") > 0.5
         ref_mask = downsample_mask(mask_input, rh, rw)
+        ref_mask_flat = ref_mask.reshape(-1)
+        similarity = tgt_flat @ ref_flat.T
+        best_similarity, best_idx_flat = similarity.max(dim=1)
+        best_idx = best_idx_flat.reshape(h, w)
         member = ref_mask.reshape(-1)[best_idx]
         votes += member.to(torch.int32)
         nn_indices.append(best_idx)
+        nn_best_similarities.append(best_similarity.reshape(h, w))
         backward_memberships.append(member)
+        if collect_matching_diagnostics:
+            foreground_max = similarity[:, ref_mask_flat].amax(dim=1)
+            if (~ref_mask_flat).any():
+                background_max = similarity[:, ~ref_mask_flat].amax(dim=1)
+            else:
+                background_max = torch.full_like(foreground_max, -torch.inf)
+            foreground_max_similarities.append(foreground_max.reshape(h, w))
+            background_max_similarities.append(background_max.reshape(h, w))
+            foreground_margins.append((foreground_max - background_max).reshape(h, w))
     backward_mask = votes >= math.ceil(shots / 2)
     candidate = forward_mask & backward_mask
     if candidate_override is not None:
@@ -185,12 +258,16 @@ def I3_reason_per_window(
     valid = cluster_labels >= 0
     continuous_score[valid] = combined[cluster_labels[valid]]
     hard_mask = continuous_score > model.merge_threshold
-    return {
+    result = {
         "raw_feat": raw_feature,
         "debiased_feat": semantic_feature,
         "sim_fwd": sim_fwd,
         "forward_mask": forward_mask,
+        "forward_gate_mode": gate_config.mode,
+        "forward_gate_applied": forward_gate_applied,
+        "forward_gate_threshold": forward_gate_threshold,
         "nn_ref_index": torch.stack(nn_indices),
+        "nn_best_similarity": torch.stack(nn_best_similarities),
         "backward_membership": torch.stack(backward_memberships),
         "backward_mask": backward_mask,
         "candidate_mask": candidate,
@@ -204,6 +281,13 @@ def I3_reason_per_window(
         "continuous_score": continuous_score,
         "pre_crf_mask": hard_mask,
     }
+    if collect_matching_diagnostics:
+        result.update({
+            "nn_foreground_max_similarity": torch.stack(foreground_max_similarities),
+            "nn_background_max_similarity": torch.stack(background_max_similarities),
+            "nn_foreground_margin": torch.stack(foreground_margins),
+        })
+    return result
 
 
 def limit_early_resolution(raw: torch.Tensor, semantic: torch.Tensor, max_tokens: int):
@@ -224,12 +308,18 @@ def run_early_reasoning(
     state: WindowFeatures,
     image_hw: tuple[int, int],
     max_tokens: int = 4096,
+    forward_gate: ForwardGateConfig | None = None,
+    collect_matching_diagnostics: bool = False,
 ) -> dict[str, Any]:
     raw, raw_coverage = fuse_feature_windows(state.raw, state.windows, image_hw)
     semantic, _ = fuse_feature_windows(state.debiased, state.windows, image_hw)
     fused_feature_hw = tuple(raw.shape[-2:])
     raw, semantic = limit_early_resolution(raw, semantic, max_tokens)
-    result = I3_reason_per_window(model, reference, raw, semantic)
+    result = I3_reason_per_window(
+        model, reference, raw, semantic,
+        forward_gate=forward_gate,
+        collect_matching_diagnostics=collect_matching_diagnostics,
+    )
     result["early_feature_coverage"] = raw_coverage
     result["early_fused_feature_hw"] = fused_feature_hw
     result["early_reasoning_feature_hw"] = tuple(raw.shape[-2:])

@@ -119,8 +119,12 @@ def _attend(
         top_mask = torch.zeros_like(keep)
         top_mask.scatter_(1, top, True)
         keep &= top_mask
-        logits = logits.masked_fill(~keep, -torch.inf)
-    attention = torch.softmax(logits.float(), dim=1).to(values.dtype)
+    # DN is defined as threshold -> -inf -> softmax for every token-bank mode.
+    # Previously the threshold was only applied in the top-k branch, so the
+    # default duplicate/deduplicated banks merely reported a mask ratio without
+    # actually masking attention.
+    masked_logits = logits.masked_fill(~keep, -torch.inf)
+    attention = torch.softmax(masked_logits.float(), dim=1).to(values.dtype)
     output = F.normalize(attention @ values, dim=1)
     entropy = -(attention.float() * attention.float().clamp_min(1e-12).log()).sum(dim=1)
     outer = ~bank_is_inner.bool()
@@ -132,6 +136,9 @@ def _attend(
         "dn_w": norm_scale.detach(),
         "mask_ratio": (1 - keep.float().mean(dim=1)).detach(),
         "attention_entropy": entropy.detach(),
+        "attention_top1_mass": attention.float().amax(dim=1).detach(),
+        "attention_effective_tokens": entropy.exp().detach(),
+        "feature_drift": (1 - (output * q).sum(dim=1)).detach(),
         "outer_positive_ratio": (outer_positive / positive_count.clamp_min(1)).detach(),
         "outer_attention_mass": attention[:, outer].sum(dim=1).detach(),
     }
