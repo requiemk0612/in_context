@@ -22,24 +22,43 @@ import numpy as np
 import os
 
 class ImageNorm(nn.Module):
+    # 初始化逐 token 的 L2 归一化层。
+    # 该层不包含可训练参数或持久状态，只用于把图像 token 映射到单位特征球面，
+    # 以便后续与已经归一化的文本特征直接计算余弦相似度。
     def __init__(self):
         super().__init__()
         
+    # 沿最后一个特征维度对输入张量做 L2 归一化。
+    # x 通常形如 [B, N, C]，返回形状保持不变；这里使用原地除法，因此会直接
+    # 改写传入张量。调用方应确保 token 范数非零，避免产生 NaN 或 Inf。
     def forward(self, x):
         x /= x.norm(dim=-1, keepdim=True)
         return x
 
 class ImageTextDotProduct(nn.Module):
+    # 保存文本类别原型，构造无可训练参数的图文相似度计算层。
+    # text_features 预期形如 [Q, C]，Q 是文本查询/类别同义词数量；通过
+    # register_buffer 注册后，它会随模块迁移设备并写入 state_dict，但不会参与梯度更新。
     def __init__(self, text_features: torch.Tensor):
         super().__init__()
         self.register_buffer('text_features', text_features)
         
+    # 计算每个图像 token 与所有文本查询原型的点积相似度。
+    # image_features 通常为 [B, N, C]，text_features.T 为 [C, Q]，
+    # 返回 logits 的形状为 [B, N, Q]；若两侧都已归一化，该点积等价于余弦相似度。
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         logits = image_features @ self.text_features.T
         return logits
 
 @MODELS.register_module()
 class GLA_CLIPSegmentation(BaseSegmentor):
+    # 构造 GLA-CLIP 开放词汇语义分割器，并初始化其推理所需的全部组件。
+    # 实际模型类型、设备、滑窗参数和注意力超参数主要从 model_cfg 读取；构造函数中
+    # 同名的独立参数保留用于 MMSeg 配置兼容。初始化过程会创建半精度 CLIP，按
+    # vfm_model 加载并冻结 DINO/DINOv2 视觉特征模型，可选加载 FARE 权重；随后读取
+    # name_path 中的类别名称/同义词，使用多套 prompt 模板编码并平均成归一化文本原型。
+    # 最后注册图像归一化、图文点积层及后处理所需的类别映射。该方法会访问模型权重、
+    # 将模型移到 model_cfg.device，并可能通过 torch.hub 触发外部模型加载。
     def __init__(self, clip_type, model_type, vfm_model, name_path, checkpoint=None, device=torch.device('cuda'),
                  prob_thd=0.0, logit_scale=40, beta=1.2, gamma=3.0, fare=False, slide_stride=112, slide_crop=224, scale=336, bg_idx=0, model_cfg=None):
 
@@ -133,6 +152,12 @@ class GLA_CLIPSegmentation(BaseSegmentor):
         self.imgnorm = ImageNorm()
         self.iq_dotproduct = ImageTextDotProduct(self.query_features)
 
+    # 为一批完整图像或滑窗 crop 提取逐 token 的 CLIP 图像特征。
+    # img 形如 [B, 3, H, W]，首先从 CLIP 归一化空间反归一化，再变换到 DINO 所需
+    # 的统计分布。ProxyCLIP 分支会额外提取 DINO/DINOv2 patch 特征，并作为
+    # external_feats 传入 CLIP 最后一层；indices 可携带每个 patch 在原图中的位置，
+    # 供跨窗口 smoothing 使用。返回 encode_image 产生的 [B, N, C] token 特征。
+    # @torch.no_grad() 保证整个特征提取过程不构建反向传播图。
     @torch.no_grad()
     def forward_feature(self, img, indices=None):
         clip_token_size = img.shape[-2] // self.clip.visual.patch_size[0], img.shape[-1] // self.clip.visual.patch_size[1]  # [14, 14]
@@ -145,6 +170,10 @@ class GLA_CLIPSegmentation(BaseSegmentor):
             if self.vfm_model == 'dino':
                 
                 feat_out = {}
+                # 捕获 DINO 最后一个注意力块的原始 QKV 投影输出。
+                # module、input 是 PyTorch forward hook 规定的接口参数；output 为该层
+                # 输出张量。函数仅把 output 保存到外层 feat_out 字典，无返回值，
+                # 以便随后的同一次 DINO 前向传播结束后拆分 q、k、v 特征。
                 def hook_fn_forward_qkv(module, input, output):
                     feat_out["qkv"] = output
                 self.vfm._modules["blocks"][-1]._modules["attn"]._modules["qkv"].register_forward_hook(
@@ -183,6 +212,14 @@ class GLA_CLIPSegmentation(BaseSegmentor):
 
         return image_features
     
+    # 对输入图像执行带重叠的滑动窗口推理，并在需要时启用跨窗口 K/V 扩展。
+    # img 支持 [B, C, H, W] 张量或 MMSeg 传入的单元素列表；stride 和 crop_size
+    # 可以是整数或 (高, 宽) 二元组。方法会生成所有窗口、窗口边界及每个 patch
+    # 对应的原图线性索引，必要时将窗口对称填充到 56 的整数倍，然后一次性提取特征。
+    # 每个窗口的 token 与文本原型计算 logits，双线性上采样回 crop 分辨率后贴回原图；
+    # 重叠像素通过 count_mat 做算术平均，最后再缩放到 img_metas 指定的原始尺寸。
+    # 返回 [B, num_queries, ori_h, ori_w] 的查询级 logits，并会同步更新 model_cfg 中
+    # 的网格数、token 尺寸、原图尺寸、bbox_list 和当前图像名等运行时元数据。
     def forward_kv_expansion(self, img, img_metas, stride=112, crop_size=224):
         """Inference by sliding-window with overlap.
         If h_crop > h_img or w_crop > w_img, the small patch will be used to
@@ -317,6 +354,11 @@ class GLA_CLIPSegmentation(BaseSegmentor):
         
         return logits
 
+    # 实现 MMSeg 的预测入口，负责组织元数据、选择推理路径并生成标准结果对象。
+    # inputs 是预处理后的 [B, C, H, W] 张量；data_samples 存在时从中读取每张图的
+    # metainfo，否则使用 ori_shape 构造最小元数据。slide_crop>0 时走滑窗及 K/V
+    # 扩展路径，否则直接提取整图特征。随后调用 postprocess_result，把查询 logits
+    # 转为类别预测。返回更新后的 data_samples；无 data_samples 时返回分割索引张量。
     def predict(self, inputs, data_samples, ori_shape=None):
         if data_samples is not None:
             batch_img_metas = [
@@ -351,6 +393,13 @@ class GLA_CLIPSegmentation(BaseSegmentor):
 
 
 
+    # 将文本查询级 logits 聚合为最终语义类别概率和像素预测。
+    # seg_logits 形如 [B, Q, H, W]，先乘 logit_scale 并沿 Q 维 softmax；当多个
+    # query/同义词属于同一类别时，根据 self.query_idx 使用 amax 聚合为
+    # [num_classes, H, W]。之后取 argmax 得到 [1, H, W] 的类别图，并把最大概率
+    # 低于 prob_thd 的像素重置为 bg_idx。若 data_samples 不为空，会为每个样本写入
+    # seg_logits 和 pred_sem_seg 两个 PixelData 字段并返回列表；否则直接返回首个
+    # 样本的类别图。gt_path 当前为保留参数，方法内没有使用。
     def postprocess_result(self, seg_logits, data_samples, gt_path=None):
         """
         seg_logits: [B, Q, H, W]
@@ -409,6 +458,10 @@ class GLA_CLIPSegmentation(BaseSegmentor):
         return data_samples
 
 
+    # 计算把 H×W 图像补齐到 patch_size 整数倍所需的对称 padding。
+    # 宽度余量优先平均分配到左、右，高度余量平均分配到上、下；当差值为奇数时，
+    # 右侧或下侧会比另一侧多 1。返回顺序为 (left, right, top, bottom)，可直接传给
+    # torch.nn.functional.pad；已经整除的维度对应 padding 为 0。
     def compute_padsize(self, H: int, W: int, patch_size: int):
         l, r, t, b = 0, 0, 0, 0
         if W % patch_size:
@@ -423,26 +476,44 @@ class GLA_CLIPSegmentation(BaseSegmentor):
 
         return l, r, t, b
 
+    # MMSeg BaseSegmentor 要求的底层张量前向接口占位。
+    # data_samples 名称沿用当前源码，但该签名没有 self，且函数体尚未实现；
+    # 当前调用会隐式返回 None，不能作为有效的模型推理路径使用。
     def _forward(data_samples):
         """
         """
 
+    # MMSeg 风格的 inference 接口占位，预期根据 img 和 batch_img_metas 执行推理。
+    # 当前函数体尚未实现，调用后只会隐式返回 None；实际预测逻辑位于 predict 和
+    # forward_kv_expansion 中。
     def inference(self, img, batch_img_metas):
         """
         """
 
+    # MMSeg 编码—解码推理接口占位，预期把输入特征转换为与原图对齐的分割 logits。
+    # 当前没有任何执行逻辑并隐式返回 None，尚未连接本类已有的特征提取与后处理流程。
     def encode_decode(self, inputs, batch_img_metas):
         """
         """
 
+    # MMSeg 特征提取接口占位，理论上应返回 backbone/neck 的多尺度特征。
+    # 当前函数体为空并隐式返回 None；本项目真正使用的 token 提取方法是
+    # forward_feature，二者暂未建立适配关系。
     def extract_feat(self, inputs):
         """
         """
 
+    # MMSeg 训练损失接口占位，预期根据 inputs 和带标注的 data_samples 返回损失字典。
+    # 当前模型仅实现推理流程，此方法没有训练计算并隐式返回 None。
     def loss(self, inputs, data_samples):
         """
         """
 
+# 从类别名称文件构建文本查询列表，以及查询到语义类别的映射关系。
+# path 指向文本文件，每行代表一个类别，同一行可用“; ”分隔多个同义名称；
+# 函数按文件行号为这些同义词分配相同类别索引，并去掉名称末尾的换行符。
+# 返回 (class_names, class_indices)：前者是展开后的所有查询字符串，后者是等长的
+# 整数类别编号列表。文件为空或格式不符合约定时，本函数不做额外校验。
 def get_cls_idx(path):
     with open(path, 'r') as f:
         name_sets = f.readlines()

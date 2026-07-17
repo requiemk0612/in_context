@@ -121,4 +121,60 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="Number of data loading workers",
     )
 
+    # sliding windows
+    parser.add_argument(
+        "--sliding-windows", "-sw",
+        default=False,
+        action="store_true",
+        help="sliding windows",
+    )
+
+    parser.add_argument(
+        "--sliding-windows-crop", "-swc",
+        default=256,
+        type=int,
+        help="the size of sliding windows",
+    )
+
+    parser.add_argument(
+        "--sliding-windows-stride", "-sws",
+        default=128,
+        type=int,
+        help="the strides of sliding windows",
+    )
+    
+    # GLA-CLIP
+    parser.add_argument(
+        "--key-value-extension", "-kve",
+        default=False,
+        type=bool,
+        action="store_true",
+        help="whether or not utilize key-value-extension",
+    )
+
+    parser.add_argument(
+        "--proxy-anchor", "-pa",
+        default=False,
+        type=bool,
+        action="store_true",
+        help="whether or not utilize proxy-anchor",
+    )
+
+    parser.add_argument(
+        "--dynamic-normalization", "-dn",
+        default=False,
+        type=bool,
+        action="store_true",
+        help="whether or not utilize dynamic-normalization",
+    )
+
+    # SPAR
+    parser.add_argument(
+        "-spar",
+        default=False,
+        type=bool,
+        action="store_true",
+        help="whether or not utilize distillation",
+    )
+
     return parser
