@@ -68,13 +68,13 @@ def get_args_parser() -> argparse.ArgumentParser:
     # Dataset
     parser.add_argument(
         "--dataset",
-        default="coco",
+        default="isaid_new",
         choices=SUPPORTED_DATASETS,
         help="Dataset for evaluation",
     )
     parser.add_argument(
         "--data-root",
-        default="data",
+        default="/data/lky/data/rs_seg/iSAID",
         help="Root directory of datasets",
     )
     parser.add_argument(
@@ -92,7 +92,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--exp-name",
-        default="insid3-coco",
+        default="insid3-iSAID",
         help="Run name",
     )
     parser.add_argument(

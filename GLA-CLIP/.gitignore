@@ -10,3 +10,5 @@ wandb
 *.log
 *.json
 output
+outputs
+Analysis_0.md

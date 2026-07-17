@@ -10,3 +10,5 @@ __pycache__/
 *.pth
 *.pt
 *.ckpt
+paper_INSID3.md
+memo.md
