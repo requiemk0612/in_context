@@ -45,11 +45,25 @@ def main(args: argparse.Namespace) -> tuple:
 
     print(f'Parameters: {sum(p.numel() for p in model.parameters()):,}')
     print('Start inference')
+    
+    if args.sliding_windows:
+        start_time = time.time()
+        pck = gla_evaluate(args, model, log_file)
+        print(f'Total inference time: {time.time() - start_time:.1f}s')
 
-    start_time = time.time()
-    pck = evaluate(args, model, log_file)
-    print(f'Total inference time: {time.time() - start_time:.1f}s')
+    else:
+        start_time = time.time()
+        pck = evaluate(args, model, log_file)
+        print(f'Total inference time: {time.time() - start_time:.1f}s')
+
     return pck
+    
+def gla_evaluate(args: argparse.Namespace, model: torch.nn.Module, log_file: str) -> tuple:
+    #TODO: accomplish the method with sliding window, reading the following help!
+    """1.除了sliding window的部分之外，其余部分尽量应该和evaluate保持一致。
+    2.
+    """
+
 
 
 def evaluate(args: argparse.Namespace, model: torch.nn.Module, log_file: str) -> tuple:

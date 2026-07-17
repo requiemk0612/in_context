@@ -153,7 +153,7 @@ class GLA_CLIPSegmentation(BaseSegmentor):
         self.iq_dotproduct = ImageTextDotProduct(self.query_features)
 
     # 为一批完整图像或滑窗 crop 提取逐 token 的 CLIP 图像特征。
-    # img 形如 [B, 3, H, W]，首先从 CLIP 归一化空间反归一化，再变换到 DINO 所需
+    # img 形如 [B, 3, H, W]，首先从 CLIP 归一化空间反归一化，再变换到 DINO 所需  (DINO需要什么统计分布？)
     # 的统计分布。ProxyCLIP 分支会额外提取 DINO/DINOv2 patch 特征，并作为
     # external_feats 传入 CLIP 最后一层；indices 可携带每个 patch 在原图中的位置，
     # 供跨窗口 smoothing 使用。返回 encode_image 产生的 [B, N, C] token 特征。
