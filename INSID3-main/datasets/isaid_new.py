@@ -44,33 +44,54 @@ class DatasetISAIDNew(Dataset):
         "plane", "Harbor",
     ]
 
-    def __init__(self, datapath: str, shot: int, num_test: int = -1) -> None:
+    def __init__(
+        self,
+        datapath: str,
+        shot: int,
+        num_test: int = -1,
+        fold: int = 0,
+    ) -> None:
         self.split = 'val'
         self.benchmark = 'isaid_new'
         self.shot = shot
         self.num_test = num_test
+        self.fold = fold
+        self.nfolds = 3
 
-        # 直接写死用户给定的路径
+        # Keep the dataset root so the classwise metadata cache can be shared by
+        # all folds without duplicating it under each image/annotation folder.
         self.datapath = datapath
         self.img_path = os.path.join(datapath, 'img_dir', self.split)
         self.ann_path = os.path.join(datapath, 'ann_dir', self.split)
 
         self.nclass = len(self.CATEGORIES)
-        self.class_ids = list(range(self.nclass))
+        self.class_ids = self.build_class_ids()
 
-        # 注意顺序：先 classwise，再 metadata
+        # Build the complete classwise index first, then expose episodes only
+        # for the five classes assigned to the requested fold.
         self.img_metadata_classwise = self.build_img_metadata_classwise()
         self.img_metadata = self.build_img_metadata()
 
-        # 限制测试数量
+        # Limit evaluation episodes only after applying the fold filter.
         if self.num_test > 0:
             self.img_metadata = self.img_metadata[:self.num_test]
 
-        print(f"[DatasetISAIDNew] {len(self.img_metadata)} episodes, "
-              f"{self.nclass} classes")
+        print(
+            f"[DatasetISAIDNew] fold {self.fold}: "
+            f"{len(self.img_metadata)} episodes, {len(self.class_ids)} classes"
+        )
 
     def build_class_ids(self) -> list[int]:
-        return self.class_ids
+        if not 0 <= self.fold < self.nfolds:
+            raise ValueError(
+                f"iSAID fold must be in [0, {self.nfolds - 1}], got {self.fold}"
+            )
+
+        # Follow the iSAID-5i protocol used by datasets/isaid.py: the 15
+        # categories are divided into three contiguous folds of five classes.
+        nclass_per_fold = self.nclass // self.nfolds
+        fold_start = self.fold * nclass_per_fold
+        return list(range(fold_start, fold_start + nclass_per_fold))
 
     def sample_episode(self, idx: int) -> tuple:
         idx %= len(self.img_metadata)
@@ -156,8 +177,9 @@ class DatasetISAIDNew(Dataset):
             print(f"[DatasetISAIDNew] Loaded classwise metadata from {cache_path}")
             return metadata
 
-        # 缓存不存在，扫描所有标注文件
-        metadata = {class_id: [] for class_id in self.class_ids}
+        # Scan all categories, rather than only the active fold, so the same
+        # cache remains valid when evaluation is restarted with another fold.
+        metadata = {class_id: [] for class_id in range(self.nclass)}
         ann_paths = sorted(glob.glob(os.path.join(self.ann_path, '*_instance_color_RGB.png')))
         for ann_path in ann_paths:
             img_name = os.path.basename(ann_path).replace('_instance_color_RGB.png', '')
@@ -170,8 +192,8 @@ class DatasetISAIDNew(Dataset):
                 if 0 <= class_id < self.nclass:
                     metadata[class_id].append(img_name)
 
-        # 去重排序并保存缓存
-        metadata = {k: sorted(list(set(v))) for k, v in metadata.items()}
+        # Deduplicate and sort image names to make episode order deterministic.
+        metadata = {k: sorted(set(v)) for k, v in metadata.items()}
         with open(cache_path, 'wb') as f:
             pickle.dump(metadata, f)
         print(f"[DatasetISAIDNew] Saved classwise metadata to {cache_path}")
@@ -184,5 +206,6 @@ def build(args) -> DatasetISAIDNew:
         datapath='/data/lky/data/rs_seg/iSAID',
         shot=args.shots,
         num_test=getattr(args, 'num_episodes', -1),
+        fold=args.fold,
     )
     return dataset
