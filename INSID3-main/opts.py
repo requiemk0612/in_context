@@ -147,7 +147,6 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--key-value-extension", "-kve",
         default=False,
-        type=bool,
         action="store_true",
         help="whether or not utilize key-value-extension",
     )
@@ -155,7 +154,6 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--proxy-anchor", "-pa",
         default=False,
-        type=bool,
         action="store_true",
         help="whether or not utilize proxy-anchor",
     )
@@ -163,18 +161,44 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dynamic-normalization", "-dn",
         default=False,
-        type=bool,
         action="store_true",
         help="whether or not utilize dynamic-normalization",
     )
 
     # SPAR
     parser.add_argument(
-        "-spar",
+        "--spar",
         default=False,
-        type=bool,
         action="store_true",
         help="whether or not utilize distillation",
+    )
+
+    parser.add_argument(
+        "--rho",
+        default=0.6,
+        type=float,
+        help="proxy anchor hyperparameter 1",
+    )
+
+    parser.add_argument(
+        "--t",
+        default=2,
+        type=int,
+        help="proxy anchor hyperparameter 2",
+    )
+
+    parser.add_argument(
+        "--lambda1",
+        default=0.3,
+        type=float,
+        help="dynamic normalization hyperparameter 1",
+    )
+
+    parser.add_argument(
+        "--lambda2",
+        default=30.0,
+        type=float,
+        help="dynamic normalization hyperparameter 2",
     )
 
     return parser
