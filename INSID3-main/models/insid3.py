@@ -100,9 +100,9 @@ class INSID3(nn.Module):
             raise RuntimeError('segment() requires reference image(s), reference mask(s), and a target image.')
         pred = self.predict_mask(self._ref_images, self._ref_masks, self._tgt_image)
             # 添加调试打印
-        print("pred_mask unique:", torch.unique(pred))
-        print("pred_mask min/max:", pred.min().item(), pred.max().item())
-        print("pred_mask sum:", pred.sum().item())
+        #print("pred_mask unique:", torch.unique(pred))
+        #print("pred_mask min/max:", pred.min().item(), pred.max().item())
+        #print("pred_mask sum:", pred.sum().item())
         self.reset_state()
         return pred
     
@@ -142,8 +142,8 @@ class INSID3(nn.Module):
         _, _, C, h, w = fmaps_norm.shape
 
         # ---------- 调试打印 1 ----------
-        print(f"[DEBUG] h={h}, w={w}, C={C}")
-        print(f"[DEBUG] fmaps_norm mean={fmaps_norm.mean().item():.4f}, std={fmaps_norm.std().item():.4f}")
+        #print(f"[DEBUG] h={h}, w={w}, C={C}")
+        #print(f"[DEBUG] fmaps_norm mean={fmaps_norm.mean().item():.4f}, std={fmaps_norm.std().item():.4f}")
         
         ref_masks = ref_masks.unsqueeze(1)
         feat_tgt = fmaps_norm[:, S]
@@ -154,7 +154,7 @@ class INSID3(nn.Module):
         feat_tgt_deb = fmaps_debiased[:, S]
 
         # ---------- 调试打印 2 ----------
-        print(f"[DEBUG] feat_tgt_deb mean={feat_tgt_deb.mean().item():.4f}, std={feat_tgt_deb.std().item():.4f}")
+        #print(f"[DEBUG] feat_tgt_deb mean={feat_tgt_deb.mean().item():.4f}, std={feat_tgt_deb.std().item():.4f}")
 
         # Reference prototype (averaged across shots)
         ref_prototypes = []
@@ -168,7 +168,7 @@ class INSID3(nn.Module):
         ).unsqueeze(1)
 
         # ---------- 调试打印 3 ----------
-        print(f"[DEBUG] ref_prototype shape: {ref_prototype.shape}")
+        #print(f"[DEBUG] ref_prototype shape: {ref_prototype.shape}")
 
         # Candidate localization (forward + backward matching)
         # Compute similarity maps between each reference and the target (debiased space)
@@ -182,7 +182,7 @@ class INSID3(nn.Module):
         )  
 
         # ---------- 调试打印 4 ----------
-        print(f"[DEBUG] candidate_mask sum: {candidate_mask.sum().item()}")
+        #print(f"[DEBUG] candidate_mask sum: {candidate_mask.sum().item()}")
 
         if candidate_mask.sum() == 0:
             return self._finalize_mask(candidate_mask, tgt_image)
@@ -193,8 +193,8 @@ class INSID3(nn.Module):
         K = int(cluster_labels.max().item()) + 1
 
             # ---------- 调试打印 5 ----------
-        print(f"[DEBUG] cluster_labels unique: {torch.unique(cluster_labels)}")
-        print(f"[DEBUG] K={K}")
+        #print(f"[DEBUG] cluster_labels unique: {torch.unique(cluster_labels)}")
+        #print(f"[DEBUG] K={K}")
 
         feat_tgt_deb_flat = feat_tgt_deb[0].reshape(C, -1).permute(1, 0)
         cluster_protos = compute_cluster_prototypes(
@@ -207,7 +207,7 @@ class INSID3(nn.Module):
             ref_prototype, feat_tgt, feat_tgt_deb, h, w
         )
         # ---------- 调试打印 6 ----------
-        print(f"[DEBUG] pred_mask (before finalize) sum: {pred_mask.sum().item()}")
+        #print(f"[DEBUG] pred_mask (before finalize) sum: {pred_mask.sum().item()}")
 
         return self._finalize_mask(pred_mask, tgt_image)
 
@@ -392,8 +392,8 @@ class INSID3(nn.Module):
         """Upsample feature-resolution mask, optionally with CRF refinement."""
         H, W = tgt_image.shape[-2:]
 
-        print(f"[DEBUG] _finalize_mask: mask shape={mask.shape}, sum={mask.sum().item()}")
-        print(f"[DEBUG] resize_to_orig_size={self.resize_to_orig_size}, orig_tgt_size={self._orig_tgt_size}")
+        #print(f"[DEBUG] _finalize_mask: mask shape={mask.shape}, sum={mask.sum().item()}")
+        #print(f"[DEBUG] resize_to_orig_size={self.resize_to_orig_size}, orig_tgt_size={self._orig_tgt_size}")
 
         if self.mask_refiner == 'crf':
             tgt_image_crf = F.interpolate(
@@ -408,6 +408,6 @@ class INSID3(nn.Module):
         else:
             up = upsample_mask(mask, H, W)
 
-        print(f"[DEBUG] after upsample: shape={up.shape}, sum={up.sum().item()}")
+        #print(f"[DEBUG] after upsample: shape={up.shape}, sum={up.sum().item()}")
 
         return up

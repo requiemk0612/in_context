@@ -74,7 +74,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--data-root",
-        default="/data/lky/data/rs_seg/iSAID",
+        default="/data/lky/data/rs_seg/",
         help="Root directory of datasets",
     )
     parser.add_argument(
@@ -124,7 +124,6 @@ def get_args_parser() -> argparse.ArgumentParser:
     # sliding windows
     parser.add_argument(
         "--sliding-windows", "-sw",
-        default=False,
         action="store_true",
         help="sliding windows",
     )
@@ -146,21 +145,18 @@ def get_args_parser() -> argparse.ArgumentParser:
     # GLA-CLIP
     parser.add_argument(
         "--key-value-extension", "-kve",
-        default=False,
         action="store_true",
         help="whether or not utilize key-value-extension",
     )
 
     parser.add_argument(
         "--proxy-anchor", "-pa",
-        default=False,
         action="store_true",
         help="whether or not utilize proxy-anchor",
     )
 
     parser.add_argument(
         "--dynamic-normalization", "-dn",
-        default=False,
         action="store_true",
         help="whether or not utilize dynamic-normalization",
     )
@@ -168,7 +164,6 @@ def get_args_parser() -> argparse.ArgumentParser:
     # SPAR
     parser.add_argument(
         "--spar",
-        default=False,
         action="store_true",
         help="whether or not utilize distillation",
     )

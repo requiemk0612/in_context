@@ -34,6 +34,8 @@ def main(args: argparse.Namespace) -> float:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
+    os.makedirs(args.output_dir, exist_ok=True)
+
     log_file = join(args.output_dir, 'log.txt')
     with open(log_file, 'w') as fp:
         fp.write(" ".join(sys.argv) + '\n')
