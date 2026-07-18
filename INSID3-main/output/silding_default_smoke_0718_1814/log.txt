@@ -1,0 +1,4 @@
+inference_segmentation.py --exp-name silding_default_smoke --num-episodes 2 -sw
+{'model_size': 'large', 'image_size': 1024, 'crf_mask_refinement': False, 'crf_size': 640, 'shots': 1, 'svd_comps': 500, 'tau': 0.6, 'merge_thresh': 0.2, 'dataset': 'isaid_new', 'data_root': '/data/lky/data/rs_seg/', 'fold': 0, 'output_dir': 'output/silding_default_smoke_0718_1814', 'exp_name': 'silding_default_smoke', 'device': 'cuda', 'seed': 0, 'num_episodes': 2, 'num_workers': 0, 'sliding_windows': True, 'sliding_windows_crop': 256, 'sliding_windows_stride': 128, 'key_value_extension': False, 'proxy_anchor': False, 'dynamic_normalization': False, 'spar': False, 'rho': 0.6, 't': 2, 'lambda1': 0.3, 'lambda2': 30.0}
+
+mIoU = 0.3
