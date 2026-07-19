@@ -26,7 +26,7 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="Input image resolution",
     )
     parser.add_argument(
-        "--crf-mask-refinement",
+        "--crf-mask-refinement", "-crf",
         action="store_true",
         help="Enable CRF-based mask refinement.",
     )

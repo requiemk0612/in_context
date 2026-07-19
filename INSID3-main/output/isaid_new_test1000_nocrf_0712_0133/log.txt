@@ -1,4 +1,0 @@
-inference_segmentation.py --dataset isaid_new --data-root /data/lky/data/rs_seg --model-size large --image-size 1024 --shots 1 --svd-comps 500 --tau 0.6 --merge-thresh 0.2 --exp-name isaid_new_test1000_nocrf --num-episodes 1000 --device cuda:1 --num-workers 2
-{'model_size': 'large', 'image_size': 1024, 'crf_mask_refinement': False, 'crf_size': 640, 'shots': 1, 'svd_comps': 500, 'tau': 0.6, 'merge_thresh': 0.2, 'dataset': 'isaid_new', 'data_root': '/data/lky/data/rs_seg', 'fold': 0, 'output_dir': 'output/isaid_new_test1000_nocrf_0712_0133', 'exp_name': 'isaid_new_test1000_nocrf', 'device': 'cuda:1', 'seed': 0, 'num_episodes': 1000, 'num_workers': 2}
-
-mIoU = 1.3

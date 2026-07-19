@@ -4,4 +4,5 @@ __pycache__
 .spyproject
 data
 pretrain
-CRF
+output
+INSID3-original-code

@@ -1,4 +1,0 @@
-test_debug.py --dataset isaid_new --data-root /data/lky/data/rs_seg --model-size large --image-size 1024 --shots 1 --exp-name debug_tau05_merge035 --num-episodes 1 --device cuda:1 --num-workers 0 --tau 0.5 --merge-thresh 0.35
-{'model_size': 'large', 'image_size': 1024, 'crf_mask_refinement': False, 'crf_size': 640, 'shots': 1, 'svd_comps': 500, 'tau': 0.5, 'merge_thresh': 0.35, 'dataset': 'isaid_new', 'data_root': '/data/lky/data/rs_seg', 'fold': 0, 'output_dir': 'output/debug_tau05_merge035_0712_1120', 'exp_name': 'debug_tau05_merge035', 'device': 'cuda:1', 'seed': 0, 'num_episodes': 1, 'num_workers': 0}
-
-mIoU = 3.0
